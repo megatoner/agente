@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_jpc_ai_agent_message_tree" model="ir.ui.view">
+        <field name="name">jpc.ai.agent.message.tree</field>
+        <field name="model">jpc.ai.agent.message</field>
+        <field name="arch" type="xml">
+            <tree string="Mensajes IA">
+                <field name="create_date"/>
+                <field name="session_id"/>
+                <field name="role" widget="badge" decoration-info="role == 'user'" decoration-success="role == 'assistant'" decoration-warning="role == 'tool'"/>
+                <field name="content"/>
+                <field name="tool_name" optional="hide"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="action_jpc_ai_agent_message" model="ir.actions.act_window">
+        <field name="name">Mensajes IA</field>
+        <field name="res_model">jpc.ai.agent.message</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+</odoo>

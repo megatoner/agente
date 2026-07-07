@@ -1,0 +1,811 @@
+"""JPC Odoo tools for the AI agent server."""
+from langchain.tools import tool
+from typing import List, Dict, Any, Optional
+from app.odoo.client import OdooClient, get_odoo_client
+import json
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def _fmt_currency(amount) -> str:
+    try:
+        return f"${float(amount):,.0f} COP"
+    except Exception:
+        return str(amount)
+
+
+def _fmt_date(date_str: str) -> str:
+    if not date_str or date_str == "False":
+        return "N/A"
+    try:
+        from datetime import datetime
+        d = datetime.strptime(str(date_str)[:10], "%Y-%m-%d")
+        months = ["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"]
+        return f"{d.day} {months[d.month-1]} {d.year}"
+    except Exception:
+        return str(date_str)[:10]
+
+
+def _m2o(field) -> str:
+    if isinstance(field, (list, tuple)) and len(field) > 1:
+        return str(field[1])
+    return str(field) if field else "N/A"
+
+
+def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
+    """Factory that creates all JPC Odoo tools."""
+    odoo = get_odoo_client()
+
+    ch_id = (odoo_context or {}).get("channel_id")
+    _phone = (odoo_context or {}).get("phone", "")
+
+    def _base_url():
+        try:
+            return odoo.execute_kw("ir.config_parameter", "get_param",
+                                   [["web.base.url"]]) or ""
+        except Exception:
+            return ""
+
+    def _enviar_tarjetas_auto(ids: list, max_cards: int = 3) -> str:
+        """Envía tarjetas de producto por WhatsApp. Retorna mensaje de estado."""
+        if not ch_id:
+            return "⚠️ Sin canal WhatsApp — no se pueden enviar tarjetas."
+        ids_cut = ids[:max(1, min(3, int(max_cards)))]
+        try:
+            result = odoo.execute_kw(
+                "discuss.channel", "jwb_enviar_tarjeta_v3",
+                [[ch_id], ids_cut],
+            )
+            enviados = result.get("enviados", 0) if isinstance(result, dict) else 0
+            errors = result.get("errors", []) if isinstance(result, dict) else []
+            if enviados > 0:
+                msg = f"✅ {enviados} tarjeta(s) enviada(s) al cliente."
+                if errors:
+                    msg += f" ({len(errors)} con error)"
+                return msg
+            err_str = "; ".join(errors[:2]) if errors else "sin detalles"
+            return f"⚠️ No se pudo enviar tarjetas. Error: {err_str}"
+        except Exception as e:
+            logger.exception("_enviar_tarjetas_auto: error RPC")
+            return f"❌ Error enviando tarjetas: {str(e)[:200]}"
+
+    # ── CLIENTES ──────────────────────────────────────────────────────────
+
+    @tool
+    def obtener_cliente_whatsapp() -> str:
+        """Identificar automáticamente al cliente del chat de WhatsApp actual.
+
+        USA ESTA HERRAMIENTA PRIMERO si necesitas el partner_id del cliente.
+        Si partner_id > 0 en odoo_context, el cliente ya está identificado y
+        NO necesitas llamar esta herramienta — usa directamente ese partner_id.
+        """
+        ctx = odoo_context or {}
+        _partner_id = ctx.get("partner_id")
+        _partner_name = ctx.get("partner_name", "")
+        _partner_vat = ctx.get("partner_vat", "")
+        _partner_city = ctx.get("partner_city", "")
+
+        if _partner_id and int(_partner_id) > 0 and _partner_name:
+            return (
+                f"✅ Cliente identificado:\n"
+                f"ID: {_partner_id}\n"
+                f"Nombre: {_partner_name}\n"
+                f"NIT/CC: {_partner_vat or 'N/A'}\n"
+                f"Teléfono: {_phone or 'N/A'}\n"
+                f"Ciudad: {_partner_city or 'N/A'}"
+            )
+
+        if _partner_id and int(_partner_id) > 0:
+            try:
+                recs = odoo.read(
+                    "res.partner", [int(_partner_id)],
+                    ["id","name","vat","phone","email","city","credit","debit"]
+                )
+                if recs:
+                    p = recs[0]
+                    return (
+                        f"✅ Cliente identificado:\n"
+                        f"ID: {p['id']}\n"
+                        f"Nombre: {p.get('name','N/A')}\n"
+                        f"NIT/CC: {p.get('vat','N/A')}\n"
+                        f"Teléfono: {p.get('phone','N/A')}\n"
+                        f"Ciudad: {p.get('city','N/A')}\n"
+                        f"Deuda pendiente: {_fmt_currency(p.get('debit',0))}"
+                    )
+            except Exception as e:
+                logger.warning("obtener_cliente_whatsapp: error leyendo partner_id=%s: %s", _partner_id, e)
+
+        if _phone:
+            clean = "".join(c for c in _phone if c.isdigit())[-8:]
+            try:
+                partners = odoo.search_read(
+                    "res.partner",
+                    [("phone", "ilike", clean)],
+                    ["id","name","vat","phone","city","credit","debit"],
+                    1,
+                )
+                if partners:
+                    p = partners[0]
+                    return (
+                        f"✅ Cliente identificado por teléfono:\n"
+                        f"ID: {p['id']}\n"
+                        f"Nombre: {p.get('name','N/A')}\n"
+                        f"NIT/CC: {p.get('vat','N/A')}\n"
+                        f"Teléfono: {p.get('phone','N/A')}\n"
+                        f"Ciudad: {p.get('city','N/A')}\n"
+                        f"Deuda pendiente: {_fmt_currency(p.get('debit',0))}"
+                    )
+            except Exception as e:
+                logger.warning("obtener_cliente_whatsapp: error buscando por teléfono: %s", e)
+
+        return (
+            "⚠️ Cliente no identificado en el sistema.\n"
+            "Teléfono del canal: " + (_phone or "no disponible") + "\n"
+            "Solicita al cliente su nombre o empresa para registrarlo."
+        )
+
+    @tool
+    def buscar_cliente(query: str = "", phone: str = "", limit: int = 5) -> str:
+        """Buscar un cliente en Odoo por nombre, NIT, email o teléfono."""
+        if phone:
+            clean = "".join(c for c in phone if c.isdigit())[-8:]
+            domain = [("phone", "ilike", clean)]
+        elif query:
+            domain = ["|", "|", ("name", "ilike", query),
+                      ("vat", "ilike", query), ("email", "ilike", query)]
+        else:
+            domain = [("customer_rank", ">", 0)]
+        partners = odoo.search_read(
+            "res.partner", domain,
+            ["id","name","vat","phone","email","city","credit","debit"], limit)
+        if not partners:
+            return "No se encontraron clientes con ese criterio."
+        lines = []
+        for p in partners:
+            saldo = (p.get("debit") or 0)
+            lines.append(f"ID:{p['id']} | {p.get('name','')} | NIT:{p.get('vat','N/A')} | "
+                         f"Tel:{p.get('phone','N/A')} | "
+                         f"Ciudad:{p.get('city','N/A')} | Deuda:{_fmt_currency(saldo)}")
+        return "\n".join(lines)
+
+    @tool
+    def registrar_cliente(nombre: str, telefono: str = "", email: str = "",
+                          nit: str = "", ciudad: str = "") -> str:
+        """Registrar un nuevo cliente en Odoo. Retorna el ID creado."""
+        vals = {"name": nombre, "customer_rank": 1}
+        if telefono: vals["phone"] = telefono
+        if email:    vals["email"] = email
+        if nit:      vals["vat"] = nit
+        if ciudad:   vals["city"] = ciudad
+        new_id = odoo.create("res.partner", vals)
+        return f"Cliente registrado — ID:{new_id} | {nombre}"
+
+    @tool
+    def obtener_perfil_cliente(client_id: int) -> str:
+        """Obtener perfil completo de un cliente: datos, saldo, deuda."""
+        recs = odoo.read("res.partner", [client_id],
+                         ["name","vat","phone","email","city","street",
+                          "credit","debit","customer_rank"])
+        if not recs:
+            return f"Cliente ID {client_id} no encontrado."
+        p = recs[0]
+        return (f"Cliente: {p.get('name')}\nNIT: {p.get('vat','N/A')}\n"
+                f"Tel: {p.get('phone','N/A')}\n"
+                f"Email: {p.get('email','N/A')}\nCiudad: {p.get('city','N/A')}\n"
+                f"Deuda pendiente: {_fmt_currency(p.get('debit',0))}\n"
+                f"A favor (crédito): {_fmt_currency(p.get('credit',0))}")
+
+    # ── PRODUCTOS ─────────────────────────────────────────────────────────
+
+    # IDs de categorías raíz de consumibles
+    _CONSUMABLE_CATS = [15, 16, 17, 18]
+    # ID del atributo "Impresoras Compatibles" en Odoo
+    _ATTR_COMPAT_IMPRESORA = 14
+    # ID del atributo "Sku OEM" (referencia cartucho)
+    _ATTR_SKU_OEM = 13
+
+    _CONSUMABLE_STOP_DEFAULT = {
+        "toner", "tóner", "cartucho", "tinta", "drum", "chip", "impresora",
+        "printer", "laser", "láser", "inkjet", "generico", "genérico",
+        "original", "compatible", "mfp", "mpf",
+    }
+
+    def _get_stop_words() -> set:
+        bot_id = (odoo_context or {}).get("bot_id")
+        if bot_id:
+            try:
+                rec = odoo.read("jpc.whatsapp.bot.config", [bot_id], ["printer_stop_words"])
+                raw = (rec or [{}])[0].get("printer_stop_words") or ""
+                if raw.strip():
+                    return {w.strip().lower() for w in raw.splitlines() if len(w.strip()) > 1}
+            except Exception:
+                pass
+        return set(_CONSUMABLE_STOP_DEFAULT)
+
+    def _buscar_por_atributo_impresora(termino: str) -> list:
+        """Busca IDs de product.product cuyo atributo 'Impresoras Compatibles' coincide."""
+        try:
+            attr_vals = odoo.search_read(
+                "product.attribute.value",
+                [("attribute_id", "=", _ATTR_COMPAT_IMPRESORA),
+                 ("name", "ilike", termino)],
+                ["id"], 30
+            )
+            if not attr_vals:
+                return []
+            av_ids = [v["id"] for v in attr_vals]
+            ptavs = odoo.search_read(
+                "product.template.attribute.value",
+                [("product_attribute_value_id", "in", av_ids)],
+                ["product_tmpl_id"], 50
+            )
+            if not ptavs:
+                return []
+            tmpl_ids = list({p["product_tmpl_id"][0] for p in ptavs if p.get("product_tmpl_id")})
+            prods = odoo.search_read(
+                "product.product",
+                [("product_tmpl_id", "in", tmpl_ids),
+                 ("sale_ok", "=", True),
+                 ("active", "=", True),
+                 ("qty_available", ">", 0)],
+                ["id", "name", "default_code", "qty_available"], 6
+            )
+            return prods
+        except Exception as e:
+            logger.warning("_buscar_por_atributo_impresora: %s", e)
+            return []
+
+    def _buscar_por_sku_oem(referencia: str) -> list:
+        """Busca productos por atributo 'Sku OEM' (referencia de cartucho)."""
+        try:
+            attr_vals = odoo.search_read(
+                "product.attribute.value",
+                [("attribute_id", "=", _ATTR_SKU_OEM),
+                 ("name", "ilike", referencia)],
+                ["id"], 10
+            )
+            if not attr_vals:
+                return []
+            av_ids = [v["id"] for v in attr_vals]
+            ptavs = odoo.search_read(
+                "product.template.attribute.value",
+                [("product_attribute_value_id", "in", av_ids)],
+                ["product_tmpl_id"], 20
+            )
+            if not ptavs:
+                return []
+            tmpl_ids = list({p["product_tmpl_id"][0] for p in ptavs if p.get("product_tmpl_id")})
+            prods = odoo.search_read(
+                "product.product",
+                [("product_tmpl_id", "in", tmpl_ids),
+                 ("sale_ok", "=", True),
+                 ("active", "=", True),
+                 ("qty_available", ">", 0)],
+                ["id", "name", "default_code", "qty_available"], 6
+            )
+            return prods
+        except Exception as e:
+            logger.warning("_buscar_por_sku_oem: %s", e)
+            return []
+
+    @tool
+    def buscar_producto(referencia: str) -> str:
+        """Buscar productos en el catálogo por referencia de cartucho o modelo de impresora.
+
+        Úsala UNA VEZ POR CADA referencia o modelo que el cliente mencione.
+        Ejemplos:
+          buscar_producto("HP LaserJet M1132")
+          buscar_producto("HP Laser MFP 135w")
+          buscar_producto("CE285A")
+          buscar_producto("85A")
+          buscar_producto("Canon MG3010")
+
+        La búsqueda usa SOLO atributos configurados (Impresoras Compatibles, SKU OEM,
+        Referencia interna). NO busca por texto libre — esto garantiza resultados correctos.
+
+        Esta herramienta envía automáticamente las tarjetas al cliente.
+        NO necesitas hacer nada más después de llamarla.
+        """
+        prods = []
+        bot_id = (odoo_context or {}).get("bot_id")
+
+        # Paso 1: buscar vía método Odoo (usa atributos configurados del bot)
+        if bot_id:
+            try:
+                ids = odoo.execute_kw(
+                    "jpc.whatsapp.bot.config", "buscar_para_agente",
+                    [[bot_id], referencia],
+                )
+                if ids:
+                    prods = odoo.read(
+                        "product.product", ids,
+                        ["id", "name", "default_code", "qty_available"],
+                    )
+            except Exception as e:
+                logger.warning("buscar_producto: buscar_para_agente error: %s", e)
+
+        # Paso 2: fallback local por atributos (sin bot_id o si Odoo no responde)
+        if not prods:
+            prods = _buscar_por_atributo_impresora(referencia)
+        if not prods:
+            prods = _buscar_por_sku_oem(referencia)
+
+        if not prods:
+            return (
+                f"No encontré productos con stock para '{referencia}'.\n"
+                f"Pídele al cliente la referencia exacta del cartucho "
+                f"(ej: Q2612A, 85A, CE285A) o el modelo exacto de impresora."
+            )
+
+        ids = [p["id"] for p in prods]
+        logger.info("buscar_producto: '%s' → IDs=%s", referencia, ids)
+
+        tarjeta_result = _enviar_tarjetas_auto(ids, max_cards=3)
+
+        lines = [f"Encontré {len(prods)} producto(s) para '{referencia}'."]
+        for p in prods:
+            qty = p.get("qty_available", 0)
+            stock_txt = f" | Stock:{qty:.0f}" if qty is not None else ""
+            lines.append(f"  - ID:{p['id']} | {p.get('name', '')} | Ref:{p.get('default_code', 'N/A')}{stock_txt}")
+        lines.append(tarjeta_result)
+        return "\n".join(lines)
+
+    # ── COTIZACIONES ──────────────────────────────────────────────────────
+
+
+    # ── PRECIOS ─────────────────────────────────────────────────────────────────
+
+    @tool
+    def obtener_precio(product_id: int, partner_id: int, qty: float = 1.0) -> str:
+        """Obtener el precio real de un producto para un cliente con su lista de precios.
+
+        USAR SIEMPRE antes de informar un precio al cliente.
+        Aplica la pricelist real del cliente en Odoo (descuentos, condiciones especiales).
+        """
+        try:
+            order_id = odoo.create("sale.order", {
+                "partner_id": partner_id,
+                "state": "draft",
+                "payment_method_id": 215,
+            })
+            line_id = odoo.create("sale.order.line", {
+                "order_id": order_id,
+                "product_id": product_id,
+                "product_uom_qty": qty,
+            })
+            lines = odoo.read("sale.order.line", [line_id],
+                              ["price_unit", "price_subtotal", "product_id", "discount"])
+            odoo.execute_kw("sale.order", "unlink", [[order_id]])
+            if not lines:
+                return f"No se pudo calcular el precio del producto {product_id}."
+            li = lines[0]
+            price    = li.get("price_unit", 0)
+            subtotal = li.get("price_subtotal", 0)
+            discount = li.get("discount", 0)
+            prod_name = (li.get("product_id") or [None, str(product_id)])[1]
+            desc_txt = f" (descuento {discount:.0f}%)" if discount else ""
+            return (
+                f"💰 {prod_name}\n"
+                f"Precio unitario: {_fmt_currency(price)}{desc_txt}\n"
+                f"Subtotal ({qty:.0f} uds): {_fmt_currency(subtotal)}"
+            )
+        except Exception as e:
+            logger.exception("obtener_precio: error")
+            try:
+                prods = odoo.read("product.product", [product_id], ["name", "lst_price"])
+                if prods:
+                    p = prods[0]
+                    return (
+                        f"💰 {p['name']}\n"
+                        f"Precio base: {_fmt_currency(p['lst_price'])}\n"
+                        f"(precio aproximado, pricelist no disponible)"
+                    )
+            except Exception:
+                pass
+            return f"❌ Error consultando precio: {str(e)[:200]}"
+
+    @tool
+    def crear_cotizacion(partner_id: int, nota: str = "") -> str:
+        """Crear una nueva cotización para un cliente. Retorna ID y nombre."""
+        vals = {
+            "partner_id": partner_id,
+            "state": "draft",
+            "payment_method_id": 215,
+        }
+        if nota:
+            vals["note"] = nota
+        new_id = odoo.create("sale.order", vals)
+        recs = odoo.read("sale.order", [new_id], ["name"])
+        name = recs[0]["name"] if recs else str(new_id)
+        return f"Cotización creada: {name} (ID:{new_id})"
+
+    @tool
+    def agregar_linea_cotizacion(order_id: int, product_id: int, cantidad: float = 1.0) -> str:
+        """Agregar un producto a una cotizacion existente. Odoo aplica la pricelist del cliente."""
+        prods = odoo.read("product.product", [product_id], ["name"])
+        if not prods:
+            return f"Producto {product_id} no encontrado."
+        odoo.create("sale.order.line", {
+            "order_id": order_id, "product_id": product_id,
+            "product_uom_qty": cantidad,
+        })
+        return f"✅ Agregado: {prods[0]['name']} × {cantidad:.0f} uds"
+
+    @tool
+    def obtener_cotizacion(order_id: int) -> str:
+        """Obtener detalles de una cotización: cliente, estado, líneas, total."""
+        recs = odoo.read("sale.order", [order_id],
+                         ["name","partner_id","state","amount_total","date_order","order_line"])
+        if not recs:
+            return f"Cotización {order_id} no encontrada."
+        o = recs[0]
+        state_map = {"draft":"Borrador","sent":"Enviada","sale":"Confirmada",
+                     "cancel":"Cancelada","done":"Finalizada"}
+        lines_text = ""
+        if o.get("order_line"):
+            lines = odoo.read("sale.order.line", o["order_line"],
+                              ["product_id","product_uom_qty","price_unit","price_subtotal"])
+            items = [f"  • {_m2o(l.get('product_id'))} × {l.get('product_uom_qty',0):.0f} = "
+                     f"{_fmt_currency(l.get('price_subtotal',0))}" for l in lines]
+            lines_text = "\nProductos:\n" + "\n".join(items)
+        return (f"Cotización: {o.get('name')}\nCliente: {_m2o(o.get('partner_id'))}\n"
+                f"Estado: {state_map.get(o.get('state',''), o.get('state',''))}\n"
+                f"Fecha: {_fmt_date(str(o.get('date_order','') or ''))}\n"
+                f"Total: {_fmt_currency(o.get('amount_total',0))}{lines_text}")
+
+    @tool
+    def confirmar_orden(order_id: int) -> str:
+        """Confirmar una cotización y convertirla en pedido de venta."""
+        try:
+            odoo.execute_kw("sale.order", "action_confirm", [[order_id]])
+            recs = odoo.read("sale.order", [order_id], ["name"])
+            name = recs[0]["name"] if recs else str(order_id)
+            return f"✅ Orden {name} confirmada."
+        except Exception as e:
+            return f"Error al confirmar: {str(e)}"
+
+    @tool
+    def enviar_cotizacion_whatsapp(order_id: int) -> str:
+        """Obtener el enlace de portal de una cotización para compartir con el cliente."""
+        recs = odoo.read("sale.order", [order_id], ["name","amount_total","partner_id"])
+        if not recs:
+            return f"Cotización {order_id} no encontrada."
+        o = recs[0]
+        url = f"{_base_url()}/my/quotes/{order_id}"
+        return (f"📋 *{o.get('name')}* — {_fmt_currency(o.get('amount_total',0))}\n"
+                f"🔗 {url}\n"
+                f"(enlace para {_m2o(o.get('partner_id'))})")
+
+    # ── FACTURAS ──────────────────────────────────────────────────────────
+
+    @tool
+    def listar_facturas(partner_id: int, limit: int = 5) -> str:
+        """Listar las facturas de un cliente ordenadas por fecha."""
+        invs = odoo.search_read(
+            "account.move",
+            [("partner_id","=",partner_id),("move_type","=","out_invoice")],
+            ["name","invoice_date","amount_total","amount_residual","payment_state"], limit)
+        if not invs:
+            return "No se encontraron facturas para este cliente."
+        state_map = {"not_paid":"Pendiente","partial":"Parcial","paid":"Pagada",
+                     "in_payment":"En pago","reversed":"Anulada"}
+        lines = []
+        for inv in invs:
+            state = state_map.get(inv.get("payment_state",""), inv.get("payment_state",""))
+            e = "✅" if inv.get("payment_state") == "paid" else "⏳"
+            lines.append(f"{e} {inv.get('name')} | {_fmt_date(str(inv.get('invoice_date','') or ''))} | "
+                         f"Total:{_fmt_currency(inv.get('amount_total',0))} | "
+                         f"Saldo:{_fmt_currency(inv.get('amount_residual',0))} | {state}")
+        return "\n".join(lines)
+
+    @tool
+    def obtener_factura(invoice_id: int) -> str:
+        """Obtener detalles completos de una factura por su ID."""
+        recs = odoo.read("account.move", [invoice_id],
+                         ["name","partner_id","invoice_date","invoice_date_due",
+                          "amount_total","amount_residual","payment_state"])
+        if not recs:
+            return f"Factura {invoice_id} no encontrada."
+        inv = recs[0]
+        state_map = {"not_paid":"Pendiente","partial":"Pago parcial","paid":"Pagada",
+                     "in_payment":"En pago","reversed":"Anulada"}
+        return (f"Factura: {inv.get('name')}\nCliente: {_m2o(inv.get('partner_id'))}\n"
+                f"Fecha: {_fmt_date(str(inv.get('invoice_date','') or ''))}\n"
+                f"Vencimiento: {_fmt_date(str(inv.get('invoice_date_due','') or ''))}\n"
+                f"Total: {_fmt_currency(inv.get('amount_total',0))}\n"
+                f"Saldo: {_fmt_currency(inv.get('amount_residual',0))}\n"
+                f"Estado: {state_map.get(inv.get('payment_state',''), inv.get('payment_state',''))}")
+
+    @tool
+    def enviar_factura_whatsapp(invoice_id: int) -> str:
+        """Obtener el enlace de portal de una factura para compartir con el cliente."""
+        recs = odoo.read("account.move", [invoice_id], ["name","amount_total","amount_residual"])
+        if not recs:
+            return f"Factura {invoice_id} no encontrada."
+        inv = recs[0]
+        url = f"{_base_url()}/my/invoices/{invoice_id}"
+        return (f"📄 *{inv.get('name')}*\n"
+                f"Total:{_fmt_currency(inv.get('amount_total',0))} | "
+                f"Pendiente:{_fmt_currency(inv.get('amount_residual',0))}\n"
+                f"🔗 {url}")
+
+    @tool
+    def estado_de_cuenta(partner_id: int) -> str:
+        """Obtener el estado de cuenta del cliente: deuda total y facturas vencidas."""
+        invs = odoo.search_read(
+            "account.move",
+            [("partner_id","=",partner_id),("move_type","=","out_invoice"),
+             ("payment_state","in",["not_paid","partial"])],
+            ["name","invoice_date_due","amount_residual"], 20)
+        if not invs:
+            return "✅ El cliente no tiene facturas pendientes."
+        total = sum(i.get("amount_residual",0) for i in invs)
+        lines = [f"💳 Deuda total: {_fmt_currency(total)}\n"]
+        for inv in invs:
+            lines.append(f"  • {inv.get('name')} | Vence:{_fmt_date(str(inv.get('invoice_date_due','') or ''))} | "
+                         f"{_fmt_currency(inv.get('amount_residual',0))}")
+        return "\n".join(lines)
+
+    @tool
+    def generar_link_pago(invoice_id: int) -> str:
+        """Generar el enlace de pago online para una factura."""
+        recs = odoo.read("account.move", [invoice_id], ["name","amount_residual"])
+        if not recs:
+            return f"Factura {invoice_id} no encontrada."
+        inv = recs[0]
+        url = f"{_base_url()}/my/invoices/{invoice_id}"
+        return (f"🔗 Enlace de pago — {inv.get('name')}\n"
+                f"Saldo: {_fmt_currency(inv.get('amount_residual',0))}\n{url}")
+
+    @tool
+    def enviar_link_pago_whatsapp(invoice_id: int) -> str:
+        """Obtener el texto con enlace de pago de una factura para WhatsApp."""
+        recs = odoo.read("account.move", [invoice_id], ["name","amount_residual"])
+        if not recs:
+            return f"Factura {invoice_id} no encontrada."
+        inv = recs[0]
+        url = f"{_base_url()}/my/invoices/{invoice_id}"
+        return (f"💳 *{inv.get('name')}*\n"
+                f"Valor a pagar: {_fmt_currency(inv.get('amount_residual',0))}\n"
+                f"🔗 {url}")
+
+    # ── PEDIDOS ───────────────────────────────────────────────────────────
+
+    @tool
+    def listar_pedidos_cliente(partner_id: int, limit: int = 5) -> str:
+        """Listar los pedidos confirmados de un cliente."""
+        orders = odoo.search_read(
+            "sale.order",
+            [("partner_id","=",partner_id),("state","in",["sale","done"])],
+            ["name","date_order","amount_total","state"], limit)
+        if not orders:
+            return "No se encontraron pedidos para este cliente."
+        state_map = {"sale":"Confirmado","done":"Entregado","cancel":"Cancelado"}
+        return "\n".join(
+            f"📦 {o.get('name')} | {_fmt_date(str(o.get('date_order','') or ''))} | "
+            f"{_fmt_currency(o.get('amount_total',0))} | {state_map.get(o.get('state',''),o.get('state',''))}"
+            for o in orders)
+
+    @tool
+    def estado_entrega(order_id: int) -> str:
+        """Consultar el estado de entrega de un pedido."""
+        recs = odoo.read("sale.order", [order_id], ["name","picking_ids"])
+        if not recs:
+            return f"Pedido {order_id} no encontrado."
+        o = recs[0]
+        pids = o.get("picking_ids", [])
+        if not pids:
+            return f"Pedido {o.get('name')}: no tiene envío generado aún."
+        picks = odoo.read("stock.picking", pids, ["name","state","scheduled_date","date_done"])
+        state_map = {"draft":"Borrador","waiting":"Esperando","confirmed":"Confirmado",
+                     "assigned":"Listo","done":"Entregado","cancel":"Cancelado"}
+        lines = [f"Pedido: {o.get('name')}"]
+        for pick in picks:
+            state = state_map.get(pick.get("state",""), pick.get("state",""))
+            fecha = _fmt_date(str(pick.get("date_done") or pick.get("scheduled_date","") or ""))
+            lines.append(f"  🚚 {pick.get('name')} | {state} | {fecha}")
+        return "\n".join(lines)
+
+    # ── TICKETS / SOPORTE ─────────────────────────────────────────────────
+
+    @tool
+    def listar_tickets_cliente(partner_id: int, limit: int = 5) -> str:
+        """Listar los tickets de soporte de un cliente."""
+        try:
+            tickets = odoo.search_read(
+                "helpdesk.ticket", [("partner_id","=",partner_id)],
+                ["name","create_date","stage_id"], limit)
+        except Exception:
+            return "El módulo de helpdesk no está disponible."
+        if not tickets:
+            return "No se encontraron tickets para este cliente."
+        return "\n".join(
+            f"🎫 {t.get('name')} | {_fmt_date(str(t.get('create_date',''))[:10])} | "
+            f"Estado:{_m2o(t.get('stage_id'))}"
+            for t in tickets)
+
+    @tool
+    def crear_ticket_garantia(partner_id: int, asunto: str, descripcion: str = "") -> str:
+        """Crear un ticket de soporte o garantía para un cliente."""
+        try:
+            ticket_id = odoo.create("helpdesk.ticket", {
+                "name": asunto, "partner_id": partner_id, "description": descripcion})
+            return f"✅ Ticket creado — ID:{ticket_id} | {asunto}"
+        except Exception as e:
+            return f"Error creando ticket: {str(e)}"
+
+    @tool
+    def obtener_ticket(ticket_id: int) -> str:
+        """Obtener detalles de un ticket de soporte por su ID."""
+        try:
+            recs = odoo.read("helpdesk.ticket", [ticket_id],
+                             ["name","partner_id","stage_id","description","create_date"])
+            if not recs:
+                return f"Ticket {ticket_id} no encontrado."
+            t = recs[0]
+            return (f"Ticket: {t.get('name')}\nCliente: {_m2o(t.get('partner_id'))}\n"
+                    f"Estado: {_m2o(t.get('stage_id'))}\n"
+                    f"Fecha: {_fmt_date(str(t.get('create_date',''))[:10])}\n"
+                    f"Descripción: {t.get('description','N/A')}")
+        except Exception as e:
+            return f"Error: {str(e)}"
+
+    @tool
+    def actualizar_ticket(ticket_id: int, nota: str = "") -> str:
+        """Agregar una nota interna a un ticket de soporte."""
+        try:
+            if nota:
+                odoo.execute_kw("helpdesk.ticket", "message_post", [[ticket_id]],
+                                {"body": nota, "message_type": "comment",
+                                 "subtype_xmlid": "mail.mt_note"})
+            return f"✅ Ticket {ticket_id} actualizado."
+        except Exception as e:
+            return f"Error: {str(e)}"
+
+    @tool
+    def verificar_garantia(partner_id: int, product_name: str = "") -> str:
+        """Verificar si un cliente tiene tickets de garantía activos."""
+        try:
+            domain = [("partner_id","=",partner_id)]
+            if product_name:
+                domain.append(("name","ilike",product_name))
+            tickets = odoo.search_read("helpdesk.ticket", domain, ["name","stage_id"], 5)
+            if not tickets:
+                return "No se encontraron garantías activas."
+            return "\n".join(f"🎫 {t.get('name')} | {_m2o(t.get('stage_id'))}" for t in tickets)
+        except Exception as e:
+            return f"Helpdesk no disponible: {str(e)}"
+
+    @tool
+    def registrar_solucion(ticket_id: int, solucion: str) -> str:
+        """Registrar la solución aplicada a un ticket de soporte."""
+        try:
+            odoo.execute_kw("helpdesk.ticket", "message_post", [[ticket_id]],
+                            {"body": f"✅ Solución: {solucion}", "message_type": "comment",
+                             "subtype_xmlid": "mail.mt_note"})
+            return f"✅ Solución registrada en ticket {ticket_id}."
+        except Exception as e:
+            return f"Error: {str(e)}"
+
+    # ── CARTERA ───────────────────────────────────────────────────────────
+
+    @tool
+    def registrar_pago(partner_id: int, amount: float, invoice_id: int = 0, nota: str = "") -> str:
+        """Anotar un pago de cliente (requiere confirmación posterior en Odoo)."""
+        msg = f"💰 Pago anotado: {_fmt_currency(amount)}"
+        if nota: msg += f" — {nota}"
+        if invoice_id: msg += f" (factura ID:{invoice_id})"
+        try:
+            odoo.execute_kw("res.partner", "message_post", [[partner_id]],
+                            {"body": msg, "message_type": "comment"})
+        except Exception:
+            pass
+        return f"✅ {msg}\n⚠️ Requiere confirmación en Odoo."
+
+    @tool
+    def listar_pagos(partner_id: int, limit: int = 5) -> str:
+        """Listar los pagos recientes de un cliente."""
+        pays = odoo.search_read(
+            "account.payment",
+            [("partner_id","=",partner_id),("payment_type","=","inbound")],
+            ["name","date","amount","state"], limit)
+        if not pays:
+            return "No se encontraron pagos para este cliente."
+        state_map = {"draft":"Borrador","posted":"Confirmado","cancel":"Cancelado"}
+        return "\n".join(
+            f"💰 {p.get('name')} | {_fmt_date(str(p.get('date','') or ''))} | "
+            f"{_fmt_currency(p.get('amount',0))} | {state_map.get(p.get('state',''),p.get('state',''))}"
+            for p in pays)
+
+    @tool
+    def enviar_estado_cuenta_whatsapp(partner_id: int) -> str:
+        """Generar el texto del estado de cuenta para enviar por WhatsApp."""
+        invs = odoo.search_read(
+            "account.move",
+            [("partner_id","=",partner_id),("move_type","=","out_invoice"),
+             ("payment_state","in",["not_paid","partial"])],
+            ["name","invoice_date_due","amount_residual"], 10)
+        if not invs:
+            return "✅ El cliente no tiene saldo pendiente."
+        total = sum(i.get("amount_residual",0) for i in invs)
+        recs = odoo.read("res.partner", [partner_id], ["name"])
+        pname = recs[0]["name"] if recs else "Cliente"
+        lines = [f"📊 *Estado de cuenta — {pname}*",
+                 f"Saldo total: *{_fmt_currency(total)}*\n"]
+        for inv in invs:
+            lines.append(f"  • {inv.get('name')} | Vence:{_fmt_date(str(inv.get('invoice_date_due','') or ''))} | "
+                         f"{_fmt_currency(inv.get('amount_residual',0))}")
+        return "\n".join(lines)
+
+    @tool
+    def crear_acuerdo_pago(partner_id: int, plan_descripcion: str) -> str:
+        """Registrar un acuerdo de pago con un cliente."""
+        msg = f"🤝 Acuerdo de pago: {plan_descripcion}"
+        try:
+            odoo.execute_kw("res.partner", "message_post", [[partner_id]],
+                            {"body": msg, "message_type": "comment"})
+        except Exception:
+            pass
+        return f"✅ {msg}"
+
+    # ── WHATSAPP / ESCALACIÓN ─────────────────────────────────────────────
+
+    @tool
+    def escalar_a_asesor(motivo: str = "") -> str:
+        """Escalar la conversación a un asesor humano.
+        Usar cuando el cliente lo solicite o la consulta supere las capacidades del bot."""
+        if ch_id:
+            try:
+                ctx = json.dumps({"v3_escalate": True, "motivo": motivo})
+                odoo.execute_kw("discuss.channel", "write", [[ch_id], {"jwb_bot_context": ctx}])
+            except Exception as e:
+                logger.warning("escalar_a_asesor: %s", e)
+        return f"✅ Escalación solicitada. Un asesor continuará la atención.{' Motivo: ' + motivo if motivo else ''}"
+
+    # ── GENÉRICOS ─────────────────────────────────────────────────────────
+
+    @tool
+    def search_contacts(name: str = "", email: str = "", limit: int = 10) -> str:
+        """Buscar contactos en Odoo por nombre o email."""
+        domain = []
+        if name: domain.append(("name","ilike",name))
+        if email: domain.append(("email","ilike",email))
+        partners = odoo.search_read("res.partner", domain,
+                                    ["name","email","phone","id"], limit)
+        if not partners:
+            return "No se encontraron contactos."
+        return "\n".join(
+            f"ID:{p['id']} | {p.get('name')} | {p.get('email')} | {p.get('phone')}"
+            for p in partners)
+
+    @tool
+    def search_odoo_model(model: str, domain_json: str = "[]",
+                          fields_json: str = "[]", limit: int = 20) -> str:
+        """Buscar registros en cualquier modelo de Odoo (herramienta genérica).
+        domain_json: '[["field","op","val"]]'. fields_json: '["field1","field2"]'."""
+        domain = json.loads(domain_json)
+        fields = json.loads(fields_json)
+        records = odoo.search_read(model, domain, fields or None, limit)
+        if not records:
+            return "No se encontraron registros."
+        return json.dumps(records, ensure_ascii=False, default=str)
+
+    return [
+        obtener_cliente_whatsapp, buscar_cliente, registrar_cliente, obtener_perfil_cliente,
+        obtener_precio, buscar_producto,
+        crear_cotizacion, agregar_linea_cotizacion, obtener_cotizacion, confirmar_orden,
+        enviar_cotizacion_whatsapp,
+        listar_facturas, obtener_factura, enviar_factura_whatsapp, estado_de_cuenta,
+        generar_link_pago, enviar_link_pago_whatsapp,
+        listar_pedidos_cliente, estado_entrega,
+        listar_tickets_cliente, crear_ticket_garantia, obtener_ticket, actualizar_ticket,
+        verificar_garantia, registrar_solucion,
+        registrar_pago, listar_pagos, enviar_estado_cuenta_whatsapp, crear_acuerdo_pago,
+        escalar_a_asesor,
+        search_contacts, search_odoo_model,
+    ]
+
+
+def get_odoo_tools():
+    return create_odoo_tools()

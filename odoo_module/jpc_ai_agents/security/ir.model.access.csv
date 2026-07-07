@@ -1,0 +1,10 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_jpc_ai_agent_config_user,jpc.ai.agent.config user,model_jpc_ai_agent_config,base.group_user,1,0,0,0
+access_jpc_ai_agent_config_manager,jpc.ai.agent.config manager,model_jpc_ai_agent_config,base.group_system,1,1,1,1
+access_jpc_ai_agent_session_user,jpc.ai.agent.session user,model_jpc_ai_agent_session,base.group_user,1,1,1,0
+access_jpc_ai_agent_session_manager,jpc.ai.agent.session manager,model_jpc_ai_agent_session,base.group_system,1,1,1,1
+access_jpc_ai_agent_message_user,jpc.ai.agent.message user,model_jpc_ai_agent_message,base.group_user,1,1,1,0
+access_jpc_ai_agent_message_manager,jpc.ai.agent.message manager,model_jpc_ai_agent_message,base.group_system,1,1,1,1
+access_jpc_ai_agent_tool_user,jpc.ai.agent.tool user,model_jpc_ai_agent_tool,base.group_user,1,0,0,0
+access_jpc_ai_agent_tool_manager,jpc.ai.agent.tool manager,model_jpc_ai_agent_tool,base.group_system,1,1,1,1
+access_jpc_ai_sync_tools_wizard,jpc.ai.sync.tools.wizard,model_jpc_ai_sync_tools_wizard,base.group_system,1,1,1,1

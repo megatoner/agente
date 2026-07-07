@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_jpc_ai_agent_config_tree" model="ir.ui.view">
+        <field name="name">jpc.ai.agent.config.tree</field>
+        <field name="model">jpc.ai.agent.config</field>
+        <field name="arch" type="xml">
+            <tree string="Agentes IA">
+                <field name="name"/>
+                <field name="model_id"/>
+                <field name="temperature"/>
+                <field name="memory_enabled"/>
+                <field name="session_count"/>
+                <field name="active" widget="boolean_toggle"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_jpc_ai_agent_config_form" model="ir.ui.view">
+        <field name="name">jpc.ai.agent.config.form</field>
+        <field name="model">jpc.ai.agent.config</field>
+        <field name="arch" type="xml">
+            <form string="Agente IA">
+                <sheet>
+                    <div class="oe_button_box" name="button_box">
+                        <button name="action_open_sessions" type="object" class="oe_stat_button" icon="fa-comments">
+                            <field name="session_count" widget="statinfo" string="Sesiones"/>
+                        </button>
+                        <button name="action_test_agent" type="object" class="oe_stat_button" icon="fa-play" string="Probar">
+                        </button>
+                    </div>
+                    <widget name="web_ribbon" title="Archivado" bg_color="text-bg-danger" invisible="active"/>
+                    <div class="oe_title">
+                        <h1>
+                            <field name="name" placeholder="Nombre del Agente..."/>
+                        </h1>
+                    </div>
+                    <group>
+                        <group>
+                            <field name="model_id"/>
+                            <field name="temperature" widget="float_slider" options="{'min': 0.0, 'max': 1.0, 'step': 0.1}"/>
+                            <field name="max_iterations"/>
+                            <field name="memory_enabled"/>
+                        </group>
+                        <group>
+                            <field name="user_id"/>
+                            <field name="active" widget="boolean_toggle"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="System Prompt">
+                            <field name="system_prompt" widget="text" placeholder="Instrucciones de sistema para el agente..."/>
+                        </page>
+                        <page string="Herramientas">
+                            <field name="tool_ids" widget="many2many_tags"/>
+                        </page>
+                        <page string="Descripción">
+                            <field name="description" placeholder="Descripción del propósito de este agente..."/>
+                        </page>
+                    </notebook>
+                </sheet>
+                <div class="oe_chatter">
+                    <field name="message_ids" widget="mail_thread"/>
+                </div>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_jpc_ai_agent_config_kanban" model="ir.ui.view">
+        <field name="name">jpc.ai.agent.config.kanban</field>
+        <field name="model">jpc.ai.agent.config</field>
+        <field name="arch" type="xml">
+            <kanban class="o_kanban_mobile">
+                <templates>
+                    <t t-name="kanban-box">
+                        <div class="oe_kanban_global_click o_kanban_record_has_image_fill d-flex">
+                            <div class="oe_kanban_details flex-grow-1">
+                                <strong class="o_kanban_record_title"><field name="name"/></strong>
+                                <div class="o_kanban_record_subtitle text-muted">
+                                    <field name="model_id"/>
+                                </div>
+                                <div>
+                                    <span class="badge rounded-pill bg-info"><field name="session_count"/> sesiones</span>
+                                    <span class="badge rounded-pill bg-secondary" invisible="not memory_enabled">Memoria</span>
+                                </div>
+                            </div>
+                        </div>
+                    </t>
+                </templates>
+            </kanban>
+        </field>
+    </record>
+
+    <record id="action_jpc_ai_agent_config" model="ir.actions.act_window">
+        <field name="name">Agentes IA</field>
+        <field name="res_model">jpc.ai.agent.config</field>
+        <field name="view_mode">kanban,tree,form</field>
+    </record>
+</odoo>

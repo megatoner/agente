@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <menuitem id="menu_jpc_ai_agents_root"
+              name="Agentes IA"
+              sequence="50"/>
+
+    <menuitem id="menu_jpc_ai_agent_config"
+              name="Agentes"
+              parent="menu_jpc_ai_agents_root"
+              action="action_jpc_ai_agent_config"
+              sequence="10"/>
+
+    <menuitem id="menu_jpc_ai_agent_session"
+              name="Sesiones"
+              parent="menu_jpc_ai_agents_root"
+              action="action_jpc_ai_agent_session"
+              sequence="20"/>
+
+    <menuitem id="menu_jpc_ai_agent_message"
+              name="Mensajes"
+              parent="menu_jpc_ai_agents_root"
+              action="action_jpc_ai_agent_message"
+              sequence="30"/>
+
+    <menuitem id="menu_jpc_ai_agent_tool"
+              name="Tools"
+              parent="menu_jpc_ai_agents_root"
+              action="action_jpc_ai_agent_tool"
+              sequence="40"/>
+</odoo>

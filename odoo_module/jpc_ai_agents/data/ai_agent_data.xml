@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data noupdate="1">
+        <!-- Tools predefinidas que sincronizaremos desde el servidor -->
+        <record id="tool_search_contacts" model="jpc.ai.agent.tool">
+            <field name="name">search_contacts</field>
+            <field name="display_name">Buscar Contactos</field>
+            <field name="description">Buscar contactos (res.partner) en Odoo por nombre o email.</field>
+            <field name="category">contacts</field>
+        </record>
+
+        <record id="tool_create_contact" model="jpc.ai.agent.tool">
+            <field name="name">create_contact</field>
+            <field name="display_name">Crear Contacto</field>
+            <field name="description">Crear un nuevo contacto en Odoo.</field>
+            <field name="category">contacts</field>
+        </record>
+
+        <record id="tool_create_opportunity" model="jpc.ai.agent.tool">
+            <field name="name">create_opportunity</field>
+            <field name="display_name">Crear Oportunidad</field>
+            <field name="description">Crear una oportunidad (crm.lead) en Odoo.</field>
+            <field name="category">crm</field>
+        </record>
+
+        <record id="tool_search_odoo_model" model="jpc.ai.agent.tool">
+            <field name="name">search_odoo_model</field>
+            <field name="display_name">Buscar en Cualquier Modelo</field>
+            <field name="description">Buscar registros en cualquier modelo de Odoo.</field>
+            <field name="category">generic</field>
+        </record>
+
+        <record id="tool_get_sale_orders" model="jpc.ai.agent.tool">
+            <field name="name">get_sale_orders</field>
+            <field name="display_name">Ver Órdenes de Venta</field>
+            <field name="description">Obtener órdenes de venta filtradas por estado o cliente.</field>
+            <field name="category">sales</field>
+        </record>
+
+        <record id="tool_get_products" model="jpc.ai.agent.tool">
+            <field name="name">get_products</field>
+            <field name="display_name">Buscar Productos</field>
+            <field name="description">Buscar productos por nombre.</field>
+            <field name="category">inventory</field>
+        </record>
+    </data>
+</odoo>

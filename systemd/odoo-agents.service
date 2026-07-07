@@ -1,0 +1,16 @@
+[Unit]
+Description=Odoo Agents Server
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/odoo-agents
+Environment=PYTHONPATH=/opt/odoo-agents
+EnvironmentFile=/opt/odoo-agents/.env
+ExecStart=/opt/odoo-agents/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

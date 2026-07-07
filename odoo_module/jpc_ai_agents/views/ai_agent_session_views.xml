@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_jpc_ai_agent_session_tree" model="ir.ui.view">
+        <field name="name">jpc.ai.agent.session.tree</field>
+        <field name="model">jpc.ai.agent.session</field>
+        <field name="arch" type="xml">
+            <tree string="Sesiones IA">
+                <field name="name"/>
+                <field name="agent_id"/>
+                <field name="user_id"/>
+                <field name="state" widget="badge" decoration-success="state == 'active'" decoration-muted="state == 'closed'"/>
+                <field name="message_count"/>
+                <field name="last_message_date"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_jpc_ai_agent_session_form" model="ir.ui.view">
+        <field name="name">jpc.ai.agent.session.form</field>
+        <field name="model">jpc.ai.agent.session</field>
+        <field name="arch" type="xml">
+            <form string="Sesión IA">
+                <header>
+                    <button name="action_close_session" type="object" string="Cerrar Sesión" invisible="state != 'active'" class="oe_highlight"/>
+                    <button name="action_reopen_session" type="object" string="Reabrir" invisible="state != 'closed'"/>
+                    <field name="state" widget="statusbar" statusbar_visible="active,closed"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="name"/>
+                            <field name="agent_id"/>
+                            <field name="user_id"/>
+                        </group>
+                        <group>
+                            <field name="partner_id"/>
+                            <field name="message_count"/>
+                            <field name="last_message_date"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Mensajes">
+                            <field name="message_ids" mode="tree">
+                                <tree editable="bottom">
+                                    <field name="create_date" string="Fecha"/>
+                                    <field name="role" widget="badge" decoration-info="role == 'user'" decoration-success="role == 'assistant'" decoration-warning="role == 'tool'"/>
+                                    <field name="content"/>
+                                    <field name="tool_name" optional="hide"/>
+                                </tree>
+                            </field>
+                        </page>
+                    </notebook>
+                </sheet>
+                <div class="oe_chatter">
+                    <field name="message_ids" widget="mail_thread"/>
+                </div>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_jpc_ai_agent_session" model="ir.actions.act_window">
+        <field name="name">Sesiones IA</field>
+        <field name="res_model">jpc.ai.agent.session</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+</odoo>

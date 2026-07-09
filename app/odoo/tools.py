@@ -608,6 +608,157 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 f"Deuda pendiente: {_fmt_currency(p.get('debit',0))}\n"
                 f"A favor (crédito): {_fmt_currency(p.get('credit',0))}")
 
+    @tool
+    def consultar_datos_facturacion() -> str:
+        """Verifica si el cliente de este canal ya tiene los datos necesarios para
+        facturar y despachar: NIT/cédula, nombre, correo, teléfono y al menos una
+        dirección de envío guardada. Llamar esto ANTES de pedirle cualquier dato
+        al cliente, justo en el momento en que confirma que quiere domicilio o
+        recoger en tienda — así solo se pregunta lo que realmente falta, nunca lo
+        que ya está guardado."""
+        if not ch_id:
+            return "Sin canal activo, no se puede consultar."
+        try:
+            res = odoo.execute_kw(
+                "discuss.channel", "jwb_consultar_datos_facturacion", [[ch_id]]
+            )
+        except Exception as e:
+            logger.warning("consultar_datos_facturacion: %s", e)
+            return "No se pudo consultar el estado de los datos del cliente."
+        if not res or not res.get("ok"):
+            return (res or {}).get("error") or "No se pudo consultar los datos del cliente."
+
+        lineas = [f"¿Completo para facturar?: {'SÍ' if res['completo'] else 'NO'}"]
+        if res["tiene_documento"]:
+            lineas.append(f"Documento: {res['tipo_documento']} {res['numero_documento']}")
+        else:
+            lineas.append("Documento (NIT/cédula): NO tiene — hay que pedirlo.")
+        lineas.append(f"Nombre: {res.get('nombre') or 'N/A'}")
+        lineas.append(f"Correo: {res['correo']}" if res["tiene_correo"] else "Correo: NO tiene — hay que pedirlo.")
+        lineas.append(f"Teléfono: {res['telefono']}" if res["tiene_telefono"] else "Teléfono: NO tiene — hay que pedirlo.")
+        direcciones = res.get("direcciones") or []
+        if not direcciones:
+            lineas.append("Direcciones de envío: NINGUNA guardada — hay que pedirla.")
+        elif len(direcciones) == 1:
+            d = direcciones[0]
+            lineas.append(
+                f"Dirección de envío (1 sola, confirmar con el cliente si es esta): "
+                f"{d['etiqueta']} — {d['calle']}, {d['ciudad']}"
+            )
+        else:
+            lineas.append(f"Direcciones de envío guardadas ({len(direcciones)}, preguntar cuál usar):")
+            for d in direcciones:
+                lineas.append(f"  - ID:{d['id']} | {d['etiqueta']} — {d['calle']}, {d['ciudad']}")
+        return "\n".join(lineas)
+
+    @tool
+    def completar_datos_facturacion(
+        tipo_documento: str = "",
+        numero_documento: str = "",
+        razon_social: str = "",
+        correo: str = "",
+        telefono: str = "",
+        via_principal: str = "",
+        numero_1: str = "",
+        complemento_1: str = "",
+        direccional_1: str = "",
+        numero_2: str = "",
+        complemento_2: str = "",
+        direccional_2: str = "",
+        numero_puerta: str = "",
+        interior: str = "",
+        interior_numero: str = "",
+        interior_2: str = "",
+        interior_numero_2: str = "",
+        barrio: str = "",
+        ciudad: str = "",
+        departamento: str = "",
+        indicaciones: str = "",
+        nombre_sede: str = "",
+    ) -> str:
+        """Guarda en Odoo los datos de facturación/envío que el cliente ya dio:
+        documento, correo, teléfono y/o una dirección de envío nueva. Llamar solo
+        con lo que el cliente efectivamente respondió; dejar el resto vacío — no
+        inventar valores. tipo_documento debe ser 'nit' o 'cedula'. Los campos de
+        dirección siguen la nomenclatura vial colombiana: via_principal (código,
+        ej 'CR' Carrera, 'CL' Calle, 'AV' Avenida, 'DG' Diagonal, 'TV' Transversal),
+        numero_1 (ej '74'), complemento_1 (letra si aplica, ej 'a'), numero_2 y
+        complemento_2 (número y letra tras el '#', ej '48' y 'b'), numero_puerta
+        (número tras el '-'), direccional_1/direccional_2 (Norte/Sur/Oriente/
+        Occidente si aplica), interior/interior_numero (ej 'Apartamento'/'301').
+        ciudad es indispensable para poder calcular el código postal — si el
+        cliente no la menciona, hay que preguntarla antes de llamar esta tool. Si
+        el cliente mandó una imagen de RUT en vez de escribir el NIT, usar la
+        razón social y el NIT que trae ese documento en tipo_documento/
+        numero_documento/razon_social. Cada dirección nueva se guarda como una
+        dirección de envío ADICIONAL (nunca reemplaza una existente)."""
+        if not ch_id:
+            return "Sin canal activo, no se puede guardar."
+
+        vals = {}
+        if tipo_documento:
+            vals["tipo_documento"] = tipo_documento.strip().lower()
+        if numero_documento:
+            vals["numero_documento"] = numero_documento.strip()
+        if razon_social:
+            vals["razon_social"] = razon_social.strip()
+        if correo:
+            vals["correo"] = correo.strip()
+        if telefono:
+            vals["telefono"] = telefono.strip()
+        if nombre_sede:
+            vals["nombre_sede"] = nombre_sede.strip()
+
+        _direccion_map = {
+            "via_principal_code": via_principal, "numero_1": numero_1,
+            "complemento_1": complemento_1, "direccional_1_code": direccional_1,
+            "numero_2": numero_2, "complemento_2": complemento_2,
+            "direccional_2_code": direccional_2, "numero_puerta": numero_puerta,
+            "interior_code": interior, "interior_numero": interior_numero,
+            "interior_code_2": interior_2, "interior_numero_2": interior_numero_2,
+            "barrio": barrio, "ciudad": ciudad, "departamento": departamento,
+            "indicaciones": indicaciones,
+        }
+        direccion = {k: v.strip() for k, v in _direccion_map.items() if v}
+        if direccion:
+            vals["direccion"] = direccion
+
+        if not vals:
+            return "No se recibió ningún dato para guardar."
+
+        try:
+            res = odoo.execute_kw(
+                "discuss.channel", "jwb_completar_datos_facturacion", [[ch_id], vals]
+            )
+        except Exception as e:
+            logger.warning("completar_datos_facturacion: %s", e)
+            return "No se pudieron guardar los datos, intenta de nuevo."
+
+        if not res or not res.get("ok"):
+            return (res or {}).get("error") or "No se pudieron guardar los datos."
+
+        resumen = res.get("resumen", {})
+        partes = []
+        if resumen.get("documento"):
+            d = resumen["documento"]
+            partes.append(
+                f"Documento guardado: {d['tipo'].upper()} {d['numero']} — {d['nombre']}"
+                + (" (ese documento ya existía, se vinculó a ese contacto)" if d.get("vinculado_a_existente") else "")
+            )
+        if resumen.get("documento_error"):
+            partes.append(f"⚠️ {resumen['documento_error']}")
+        if resumen.get("direccion"):
+            dd = resumen["direccion"]
+            cp_txt = dd["codigo_postal"] if dd.get("geocodificado") else "PENDIENTE (un asesor la completará)"
+            partes.append(
+                f"Dirección guardada: {dd['etiqueta']} — {dd['calle']}, {dd['ciudad']} — Código postal: {cp_txt}"
+            )
+        if resumen.get("direccion_error"):
+            partes.append(f"⚠️ {resumen['direccion_error']}")
+        if not partes:
+            partes.append("Datos de contacto (correo/teléfono) actualizados.")
+        return "\n".join(partes)
+
     # ── PRODUCTOS ─────────────────────────────────────────────────────────
 
     # IDs de categorías raíz de consumibles
@@ -3407,6 +3558,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
     return [
         obtener_cliente_whatsapp, buscar_cliente, registrar_cliente, obtener_perfil_cliente,
+        consultar_datos_facturacion, completar_datos_facturacion,
         obtener_precio, buscar_producto, buscar_producto_cotizacion,
         crear_cotizacion, agregar_linea_cotizacion, obtener_cotizacion, registrar_espera_respuesta,
         confirmar_orden, enviar_cotizacion_whatsapp,

@@ -2342,9 +2342,61 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             f"📦 {o.get('name')} (ID:{o.get('id')}) | {_fmt_date(str(o.get('date_order','') or ''))} | "
             f"{_fmt_currency(o.get('amount_total',0))} | {state_map.get(o.get('state',''),o.get('state',''))}"
             for o in orders)
+    _PICKING_FIELDS_ENTREGA = [
+        "name", "state", "scheduled_date", "date_done",
+        "x_entregado", "x_entregado_at", "carrier_id", "carrier_tracking_ref",
+    ]
+
+    def _carrier_map(picks):
+        """delivery.carrier.id -> {'name','in_store'} para los pickings dados.
+
+        in_store distingue 'recoger en tienda' (no hay transportista real,
+        el cliente viene por el pedido) de un envío real (ruta propia o
+        transportadora tercera)."""
+        ids = {p["carrier_id"][0] for p in picks if p.get("carrier_id")}
+        if not ids:
+            return {}
+        carriers = odoo.read("delivery.carrier", list(ids), ["name", "delivery_type"])
+        return {c["id"]: {"name": c.get("name") or "", "in_store": c.get("delivery_type") == "in_store"} for c in carriers}
+
+    def _fmt_estado_envio(pick, carriers):
+        """(icono, estado, fecha, lineas_extra) para un stock.picking.
+
+        x_entregado es la confirmación REAL de entrega al cliente (toggle manual
+        del repartidor/ruta, ver jpc_custom stock_picking.py) — state=='done' solo
+        significa que el picking se validó (mercancía alistada/despachada), NO que
+        el cliente ya la recibió. No tratar 'done' como entregado.
+        """
+        carrier = pick.get("carrier_id")
+        carrier_id = carrier[0] if isinstance(carrier, list) else carrier
+        info = carriers.get(carrier_id, {})
+        es_recoge_tienda = info.get("in_store", False)
+
+        if pick.get("x_entregado"):
+            icon, estado = "✅", "Entregado"
+            fecha = _fmt_date(str(pick.get("x_entregado_at") or pick.get("date_done") or ""))
+        elif pick.get("state") == "done":
+            if es_recoge_tienda:
+                icon, estado = "🏪", "Listo para recoger en tienda"
+            else:
+                icon, estado = "🚚", "Despachado (en camino — entrega aún no confirmada)"
+            fecha = _fmt_date(str(pick.get("date_done") or pick.get("scheduled_date") or ""))
+        else:
+            pick_state_map = {"draft": "Borrador", "waiting": "Esperando",
+                               "confirmed": "Confirmado", "assigned": "Listo para despachar"}
+            icon, estado = "🚚", pick_state_map.get(pick.get("state", ""), pick.get("state", ""))
+            fecha = _fmt_date(str(pick.get("scheduled_date") or ""))
+
+        extra = []
+        if not es_recoge_tienda and info.get("name"):
+            extra.append(f"Transportista: {info['name']}")
+        if pick.get("carrier_tracking_ref"):
+            extra.append(f"Guía: {pick['carrier_tracking_ref']}")
+        return icon, estado, fecha, extra
+
     @tool
     def estado_entrega(order_id: int) -> str:
-        """Consultar el estado de entrega de un pedido. Muestra estado del pedido Y de cada envío por separado."""
+        """Consultar el estado de entrega de un pedido. Muestra estado del pedido Y de cada envío por separado (transportista y guía de rastreo si aplica)."""
         recs = odoo.read("sale.order", [order_id], ["name","state","picking_ids"])
         if not recs:
             return f"Pedido {order_id} no encontrado."
@@ -2356,16 +2408,15 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         if not pids:
             lines.append("  ⏳ Sin despacho generado aún")
         else:
-            picks = odoo.read("stock.picking", pids, ["name","state","scheduled_date","date_done"])
-            pick_state_map = {"draft":"Borrador","waiting":"Esperando","confirmed":"Confirmado",
-                              "assigned":"Listo para despachar","done":"Entregado","cancel":"Cancelado"}
+            picks = odoo.read("stock.picking", pids, _PICKING_FIELDS_ENTREGA)
             active_picks = [p for p in picks if p.get("state") != "cancel"]
             cancelled_picks = [p for p in picks if p.get("state") == "cancel"]
+            carriers = _carrier_map(active_picks)
             for pick in active_picks:
-                state = pick_state_map.get(pick.get("state",""), pick.get("state",""))
-                fecha = _fmt_date(str(pick.get("date_done") or pick.get("scheduled_date") or ""))
-                icon = "✅" if pick.get("state") == "done" else "🚚"
-                lines.append(f"  {icon} {pick.get('name')} | {state} | {fecha}")
+                icon, estado, fecha, extra = _fmt_estado_envio(pick, carriers)
+                lines.append(f"  {icon} {pick.get('name')} | {estado} | {fecha}")
+                for ex in extra:
+                    lines.append(f"      {ex}")
             if not active_picks and cancelled_picks:
                 lines.append("  ⚠️ El despacho fue cancelado pero el pedido sigue activo — puede estar pendiente de reprogramación")
         return "\n".join(lines)
@@ -2373,7 +2424,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
     @tool
     def consultar_pedidos_cliente(partner_id: int, limit: int = 5) -> str:
-        """Consultar pedidos recientes del cliente con estado de pedido y estado de envío por separado."""
+        """Consultar pedidos recientes del cliente con estado de pedido y estado de envío por separado (transportista y guía de rastreo si aplica)."""
         orders = odoo.search_read(
             "sale.order",
             [("partner_id", "=", partner_id), ("state", "in", ["sale", "done"])],
@@ -2384,10 +2435,6 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             return "No se encontraron pedidos para este cliente."
 
         state_map_order = {"sale": "Confirmado (activo)", "done": "Cerrado", "cancel": "Cancelado"}
-        state_map_pick  = {
-            "draft": "Borrador", "waiting": "Esperando", "confirmed": "Confirmado",
-            "assigned": "Listo para despachar", "done": "Entregado", "cancel": "Cancelado",
-        }
 
         lines = []
         for o in orders:
@@ -2398,17 +2445,15 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
             pids = o.get("picking_ids") or []
             if pids:
-                picks = odoo.read(
-                    "stock.picking", pids,
-                    ["name", "state", "scheduled_date", "date_done"],
-                )
+                picks = odoo.read("stock.picking", pids, _PICKING_FIELDS_ENTREGA)
                 active = [p for p in picks if p.get("state") != "cancel"]
                 cancelled = [p for p in picks if p.get("state") == "cancel"]
+                carriers = _carrier_map(active)
                 for pick in active:
-                    ep = state_map_pick.get(pick.get("state", ""), pick.get("state", ""))
-                    fp = _fmt_date(str(pick.get("date_done") or pick.get("scheduled_date") or ""))
-                    icon = "✅" if pick.get("state") == "done" else "🚚"
-                    lines.append(f"  {icon} Envío {pick.get('name')} | {ep} | {fp}")
+                    icon, estado, fecha, extra = _fmt_estado_envio(pick, carriers)
+                    lines.append(f"  {icon} Envío {pick.get('name')} | {estado} | {fecha}")
+                    for ex in extra:
+                        lines.append(f"      {ex}")
                 if not active and cancelled:
                     lines.append("  ⚠️ Envío cancelado — pedido activo, despacho pendiente de reprogramación")
             else:

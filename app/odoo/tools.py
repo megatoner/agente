@@ -1428,9 +1428,17 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             prods = _tmpl_to_prods(tmpl_ids)
 
         # Fase 2: busqueda similar (silenciosa — el aviso se lanza solo si llega a Fase 3)
-        if not prods:
+        # Refs "cortas" (<2 digitos, ej. U4, M6) NUNCA entran aqui: el ilike
+        # parcial de "similar" es demasiado propenso a falsos positivos con
+        # un solo digito. Puro-digito sigue exigiendo 3+ (ambiguo con cantidad).
+        def _valido_para_similar(t):
+            if _re.fullmatch(r'\d+', t):
+                return len(t) >= 3
+            return len(_re.findall(r'\d', t)) >= 2
+
+        if not prods and _valido_para_similar(ref_busq):
             busqueda_tipo = 'similar'
-            valid_tokens = [t for t in tokens_busq if len(t) >= 3]
+            valid_tokens = [t for t in tokens_busq if _valido_para_similar(t)]
 
             tmpl_ids = _similar(ref_busq, _tmpl_filter)
             if not tmpl_ids:
@@ -3294,17 +3302,26 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         msg_clean = _MOD.sub(' ', mensaje)
         msg_clean = _re.sub(r' {2,}', ' ', msg_clean).strip()
 
-        # Token = referencia si tiene 3+ digitos (solos o con letras)
-        # Ejemplo: 85A, 664, CE285A, 255X, 1020nw  ->  referencias
-        # Ejemplo: 2, 4, 10  ->  cantidades (1-2 digitos solos)
+        # Token = referencia si mezcla letra+digito (cualquier cantidad de
+        # digitos: nunca se confunde con cantidad porque QTY_PAT exige digitos
+        # puros sin letra pegada) o si es puro digito con 3+.
+        # Ejemplo: 85A, 664, CE285A, 255X, 1020nw, U4, M6  ->  referencias
+        # Ejemplo: 2, 4, 10  ->  cantidades (1-2 digitos solos, sin letra)
         REF_PAT = _re.compile(
             r'\b('
-            r'[A-Za-z]{1,6}\d{2,}[A-Za-z0-9]{0,8}'
-            r'|\d{2,}[A-Za-z][A-Za-z0-9]{0,8}'
+            r'[A-Za-z]{1,6}\d{1,}[A-Za-z0-9]{0,8}'
+            r'|\d{1,}[A-Za-z][A-Za-z0-9]{0,8}'
             r'|\d{3,}'
             r')\b'
         )
         QTY_PAT = _re.compile(r'(?<![A-Za-z0-9])(\d{1,2})(?![A-Za-z0-9])')
+
+        # Referencia "corta" (ej. U4, M6, con <2 digitos): solo se busca en
+        # terminos EXACTOS (=ilike sobre el string completo, sin riesgo de
+        # falso positivo). Nunca cae a "similar" (ilike parcial), donde 1
+        # solo digito genera demasiados falsos positivos.
+        def _ref_es_corta(r):
+            return len(_re.findall(r'\d', r)) < 2
 
         ref_matches = list(REF_PAT.finditer(msg_clean))
         if not ref_matches:
@@ -3399,8 +3416,8 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                     if tmpl_ids:
                         confidence = "exacta"
 
-            # Fase 2: similar en jpc_search_similar_ids
-            if not tmpl_ids:
+            # Fase 2: similar en jpc_search_similar_ids (nunca para refs cortas)
+            if not tmpl_ids and not _ref_es_corta(ref):
                 if ch_id and _bot_id:
                     try:
                         odoo.execute_kw(

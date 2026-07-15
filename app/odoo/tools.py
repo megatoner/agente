@@ -226,19 +226,9 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         if not ch_id:
             return
         try:
-            channels = odoo.search_read(
-                "discuss.channel", [["id", "=", ch_id]], ["jwb_bot_context"], limit=1
-            )
-            current = {}
-            if channels and channels[0].get("jwb_bot_context"):
-                try:
-                    current = json.loads(channels[0]["jwb_bot_context"])
-                except Exception:
-                    pass
-            current.update(updates)
             odoo.execute_kw(
-                "discuss.channel", "write",
-                [[ch_id], {"jwb_bot_context": json.dumps(current, ensure_ascii=False)}],
+                "discuss.channel", "jwb_merge_bot_context",
+                [[ch_id], json.dumps(updates, ensure_ascii=False)],
             )
         except Exception as e:
             logger.warning("_merge_bot_context: %s", e)
@@ -351,10 +341,13 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             logger.warning("_actualizar_carrito_linea_cotizada: %s", e)
 
     def _base_url():
+        # bot_agent (least-privilege) no tiene acceso directo a ir.config_parameter
+        # (endurecimiento de seguridad 2026-07-08) — se usa jwb_get_base_url, que
+        # expone SOLO este valor puntual vía sudo() del lado Odoo.
         try:
-            return odoo.execute_kw("ir.config_parameter", "get_param",
-                                   ["web.base.url"]) or ""
-        except Exception:
+            return odoo.execute_kw("jpc.whatsapp.bot.config", "jwb_get_base_url", []) or ""
+        except Exception as e:
+            logger.warning("_base_url: %s", e)
             return ""
 
     def _enviar_tarjetas_auto(ids: list, max_cards: int = 3) -> str:
@@ -651,6 +644,38 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 lineas.append(f"  - ID:{d['id']} | {d['etiqueta']} — {d['calle']}, {d['ciudad']}")
         return "\n".join(lineas)
 
+    def _estado_datos_facturacion():
+        """Chequeo server-side de datos de facturación, independiente de si el LLM
+        llamó consultar_datos_facturacion() en este turno. Se usa como guard antes
+        de cerrar una venta (generar_link_cotizacion / confirmar_cotizacion_y_link_pago)
+        porque confiar solo en que el prompt lo pida no es suficiente — se observó un
+        caso real donde el agente saltó el chequeo y mandó el link sin NIT ni correo.
+
+        Retorna (completo: bool, faltantes: str). Si la consulta falla, retorna
+        completo=True (no bloquear la venta por un problema de infraestructura —
+        mismo principio de "no bloquear" del resto del flujo de datos_facturacion)."""
+        if not ch_id:
+            return True, ""
+        try:
+            res = odoo.execute_kw(
+                "discuss.channel", "jwb_consultar_datos_facturacion", [[ch_id]]
+            )
+        except Exception as e:
+            logger.warning("_estado_datos_facturacion: %s", e)
+            return True, ""
+        if not res or not res.get("ok"):
+            return True, ""
+        if res.get("completo"):
+            return True, ""
+        faltantes = []
+        if not res.get("tiene_documento"):
+            faltantes.append("NIT/cédula")
+        if not res.get("tiene_correo"):
+            faltantes.append("correo")
+        if not (res.get("direcciones") or []):
+            faltantes.append("dirección de envío")
+        return False, ", ".join(faltantes)
+
     @tool
     def completar_datos_facturacion(
         tipo_documento: str = "",
@@ -793,8 +818,16 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 "product.attribute.value",
                 [("attribute_id", "=", _ATTR_COMPAT_IMPRESORA),
                  ("name", "ilike", termino)],
-                ["id"], 30
+                ["id", "name"], 30
             )
+            # Límite de palabra: "85x" no debe matchear embebido en un nombre de
+            # impresora sin separador como "M2885Xpress" (ilike es substring puro
+            # y no distingue eso de una impresora real "85x").
+            _boundary = re.compile(
+                r'(?<![a-zA-Z0-9])' + re.escape(termino) + r'(?![a-zA-Z0-9])',
+                re.IGNORECASE,
+            )
+            attr_vals = [v for v in attr_vals if _boundary.search(v.get("name") or "")]
             if not attr_vals:
                 return []
             av_ids = [v["id"] for v in attr_vals]
@@ -1527,13 +1560,29 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         ids = [p["id"] for p in prods if p.get("en_stock")]
         return prods, ids, ref, busqueda_tipo
 
+    def _chip_label(chip_attr: str) -> str:
+        """'Con chip'/'Sin chip' a partir del valor crudo del atributo Chip, o ''
+        si el producto no tiene ese atributo. Cuando hay un solo valor (caso
+        normal fuera de _build_resumen), esto es un HECHO ya confirmado —
+        no algo que el LLM deba preguntarle al cliente."""
+        c = (chip_attr or '').lower()
+        if 'sin chip' in c:
+            return 'Sin chip'
+        if 'con chip' in c or 'chip integrado' in c:
+            return 'Con chip'
+        return ''
+
     def _format_producto_output(ref: str, prods: list, tarjeta_result: str) -> str:
         lines = [f"Encontré {len(prods)} producto(s) para '{ref}'."]
         hay_agotados = any(not p.get("en_stock", True) for p in prods)
+        hay_chip_info = False
         for p in prods:
             en_stock = p.get("en_stock", True)
             qty = p.get("qty_available", 0)
             url_txt = p.get("product_url", "")
+            chip_txt = _chip_label(p.get("chip_attr", ""))
+            if chip_txt:
+                hay_chip_info = True
 
             if not en_stock:
                 # Producto agotado — no tiene precio ni tarjeta
@@ -1541,8 +1590,10 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                     f"NOMBRE_EXACTO:{p.get('name', '')}",
                     f"ID:{p['id']}",
                     f"Ref:{p.get('default_code', 'N/A')}",
-                    "❌ AGOTADO",
                 ]
+                if chip_txt:
+                    parts.append(f"Chip:{chip_txt}")
+                parts.append("❌ AGOTADO")
                 lines.append("  - " + " | ".join(parts))
             else:
                 stock_txt = f"Stock:{qty:.0f}" if qty is not None else ""
@@ -1556,6 +1607,8 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                     f"ID:{p['id']}",
                     f"Ref:{p.get('default_code', 'N/A')}",
                 ]
+                if chip_txt:
+                    parts.append(f"Chip:{chip_txt}")
                 if stock_txt:
                     parts.append(stock_txt)
                 if precio_str:
@@ -1583,6 +1636,8 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             if any(p.get("variantes_resumen") for p in prods):
                 lines.append("   - Si hay variantes de color, menciona cuáles están disponibles y cuáles agotadas")
             lines.append("   - NO incluyas precio, stock ni URLs — las tarjetas ya los tienen")
+            if hay_chip_info:
+                lines.append("   - Chip:X ya es un dato CONFIRMADO del producto — NO le preguntes al cliente si lo quiere con o sin chip")
             lines.append("   - Termina con la pregunta de intención")
             lines.append(tarjeta_result)
         else:
@@ -1592,6 +1647,8 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             lines.append("3. Si incluyes un enlace, usa EXACTAMENTE la URL_PRODUCTO. NUNCA inventes ni construyas un enlace diferente.")
             if hay_agotados:
                 lines.append("4. Para productos ❌ AGOTADO: infórmale al cliente que no está disponible. No des precio ni URL.")
+            if hay_chip_info:
+                lines.append("5. Chip:X ya es un dato CONFIRMADO del producto — NO le preguntes al cliente si lo quiere con o sin chip.")
         return "\n".join(lines)
 
     @tool
@@ -2186,6 +2243,18 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         USAR SIEMPRE que el cliente pida 'link de pago', 'link', 'el pago', 'cómo pago', etc.
         El cliente paga directamente en el portal — la orden se confirma automáticamente al pagar.
         El bot NO confirma ni factura. NUNCA uses confirmar_cotizacion_y_link_pago."""
+        _completo, _faltan = _estado_datos_facturacion()
+        if not _completo:
+            return (
+                f"⚠️ NO generes el link todavía — faltan datos de facturación del "
+                f"cliente: {_faltan}. Llama consultar_datos_facturacion() para ver "
+                f"el detalle completo, pídele SOLO lo que falta en un único mensaje "
+                f"corto, y cuando responda llama completar_datos_facturacion con lo "
+                f"que haya dado. Si el cliente se niega a darlos, usa "
+                f"escalar_a_asesor con motivo 'Cliente no quiere dar datos de "
+                f"facturación'. Recién con los datos completos vuelve a llamar "
+                f"generar_link_cotizacion."
+            )
         try:
             # Garantizar que el access_token exista (órdenes nuevas lo tienen vacío)
             try:
@@ -2225,6 +2294,18 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         USAR cuando el cliente acepta pagar. Confirma la orden → crea factura → retorna link.
         NUNCA uses generar_link_pago ni enviar_link_pago_whatsapp para cotizaciones — usa esta.
         """
+        _completo, _faltan = _estado_datos_facturacion()
+        if not _completo:
+            return (
+                f"⚠️ NO confirmes la orden todavía — faltan datos de facturación del "
+                f"cliente: {_faltan}. Llama consultar_datos_facturacion() para ver "
+                f"el detalle completo, pídele SOLO lo que falta en un único mensaje "
+                f"corto, y cuando responda llama completar_datos_facturacion con lo "
+                f"que haya dado. Si el cliente se niega a darlos, usa "
+                f"escalar_a_asesor con motivo 'Cliente no quiere dar datos de "
+                f"facturación'. Recién con los datos completos vuelve a llamar "
+                f"confirmar_cotizacion_y_link_pago."
+            )
         try:
             orders = odoo.read("sale.order", [order_id], ["name", "state"])
             if not orders:
@@ -2658,12 +2739,8 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 if resumen:
                     partes.append("Contexto: " + resumen)
                 odoo.execute_kw(
-                    "discuss.channel", "message_post",
-                    [[ch_id]],
-                    {
-                        "body": " — ".join(partes),
-                        "message_type": "notification",
-                    },
+                    "discuss.channel", "jwb_postear_nota_interna",
+                    [[ch_id], " — ".join(partes)],
                 )
             except Exception as _e:
                 logger.warning("escalar_a_asesor: no pudo postear nota canal=%s: %s", ch_id, _e)

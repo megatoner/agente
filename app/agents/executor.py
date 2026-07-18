@@ -482,11 +482,14 @@ def run_agent(
     _partner_vat = ctx.get("partner_vat", "")
     _partner_city = ctx.get("partner_city", "")
     _phone = ctx.get("phone", "")
+    _commercial_partner_name = ctx.get("commercial_partner_name", "")
     if _partner_id and int(_partner_id or 0) > 0 and _partner_name:
         _ctx_block = (
             f"\n\n[CONTEXTO DEL CANAL WHATSAPP]\n"
             f"Cliente identificado: {_partner_name} (partner_id={_partner_id})"
         )
+        if _commercial_partner_name:
+            _ctx_block += f" | Empresa/cuenta: {_commercial_partner_name}"
         if _partner_vat:
             _ctx_block += f" | NIT/CC: {_partner_vat}"
         if _partner_city:
@@ -497,6 +500,13 @@ def run_agent(
             f"\nUSA partner_id={_partner_id} directamente en las herramientas. "
             f"NO pidas el nombre ni NIT al cliente — ya está identificado."
         )
+        if _commercial_partner_name:
+            _ctx_block += (
+                f"\nLas cotizaciones/facturas de este cliente SIEMPRE quedan a nombre de "
+                f"\"{_commercial_partner_name}\" (así funciona el sistema, sin importar quién "
+                f"escriba). Si el cliente menciona el nombre de una empresa y coincide con esta, "
+                f"es la MISMA cuenta — no preguntes ni pidas confirmación, solo procede."
+            )
         dynamic_context += _ctx_block
 
     # Inyectar estado del carrito si existe

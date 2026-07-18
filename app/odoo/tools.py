@@ -515,10 +515,9 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
     @tool
     def consultar_faq(tema: str) -> str:
-        """Consultar preguntas frecuentes: métodos de pago, garantía, envío, horario, etc.
-        Llama esta herramienta cuando el cliente pregunte sobre políticas, procesos o
-        información general de la empresa (no sobre productos específicos).
-        Ejemplos: 'pago con tarjeta', 'garantía', 'tiempo de envío', 'política de devolución'.
+        """Consultar preguntas frecuentes de la empresa: métodos de pago, garantía, envíos,
+        horario, devoluciones. USAR para políticas/procesos generales, no para productos
+        específicos.
         """
         bot_id = (odoo_context or {}).get("bot_id")
         try:
@@ -603,12 +602,10 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
     @tool
     def consultar_datos_facturacion() -> str:
-        """Verifica si el cliente de este canal ya tiene los datos necesarios para
-        facturar y despachar: NIT/cédula, nombre, correo, teléfono y al menos una
-        dirección de envío guardada. Llamar esto ANTES de pedirle cualquier dato
-        al cliente, justo en el momento en que confirma que quiere domicilio o
-        recoger en tienda — así solo se pregunta lo que realmente falta, nunca lo
-        que ya está guardado."""
+        """Verifica si el cliente ya tiene los datos para facturar y despachar: NIT/cédula,
+        nombre, correo, teléfono y dirección de envío. Llamar ANTES de pedirle cualquier
+        dato (justo cuando confirma domicilio o recogida) — así solo se pregunta lo que falta.
+        """
         if not ch_id:
             return "Sin canal activo, no se puede consultar."
         try:
@@ -701,22 +698,17 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         indicaciones: str = "",
         nombre_sede: str = "",
     ) -> str:
-        """Guarda en Odoo los datos de facturación/envío que el cliente ya dio:
-        documento, correo, teléfono y/o una dirección de envío nueva. Llamar solo
-        con lo que el cliente efectivamente respondió; dejar el resto vacío — no
-        inventar valores. tipo_documento debe ser 'nit' o 'cedula'. Los campos de
-        dirección siguen la nomenclatura vial colombiana: via_principal (código,
-        ej 'CR' Carrera, 'CL' Calle, 'AV' Avenida, 'DG' Diagonal, 'TV' Transversal),
-        numero_1 (ej '74'), complemento_1 (letra si aplica, ej 'a'), numero_2 y
-        complemento_2 (número y letra tras el '#', ej '48' y 'b'), numero_puerta
-        (número tras el '-'), direccional_1/direccional_2 (Norte/Sur/Oriente/
-        Occidente si aplica), interior/interior_numero (ej 'Apartamento'/'301').
-        ciudad es indispensable para poder calcular el código postal — si el
-        cliente no la menciona, hay que preguntarla antes de llamar esta tool. Si
-        el cliente mandó una imagen de RUT en vez de escribir el NIT, usar la
-        razón social y el NIT que trae ese documento en tipo_documento/
-        numero_documento/razon_social. Cada dirección nueva se guarda como una
-        dirección de envío ADICIONAL (nunca reemplaza una existente)."""
+        """Guarda en Odoo los datos de facturación/envío que el cliente dio: documento,
+        correo, teléfono y/o una dirección de envío nueva (se agrega como dirección
+        ADICIONAL, nunca reemplaza una existente). Llenar SOLO lo que el cliente
+        respondió; no inventar valores. tipo_documento: 'nit' o 'cedula'. Si mandó
+        foto del RUT, usar el NIT y la razón social de ese documento.
+        Dirección (nomenclatura vial colombiana): via_principal código ('CR','CL',
+        'AV','DG','TV'), numero_1 (ej '74'), complemento_1 (letra), numero_2/
+        complemento_2 (tras el '#'), numero_puerta (tras el '-'), direccional_1/2
+        (Norte/Sur/Oriente/Occidente), interior/interior_numero (ej 'Apartamento'/'301').
+        ciudad es OBLIGATORIA para el código postal — si falta, preguntarla antes de llamar.
+        """
         if not ch_id:
             return "Sin canal activo, no se puede guardar."
 
@@ -1654,12 +1646,9 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
     @tool
     def buscar_producto(referencia: str) -> str:
         """Buscar productos por referencia de cartucho o modelo de impresora.
-
-        USAR SOLO EN MODO PRECIO: cuando el cliente consulta precio SIN intención de compra.
-        Envía automáticamente tarjetas WhatsApp con imagen y precio del producto.
-
-        Retorna NOMBRE_EXACTO, PRECIO_x1 y URL_PRODUCTO de Odoo.
-        DEBES usar esos valores textualmente en tu respuesta.
+        SOLO para consulta de precio SIN intención de compra: envía tarjetas WhatsApp
+        con imagen y precio. Usa NOMBRE_EXACTO, PRECIO_x1 y URL_PRODUCTO retornados,
+        textualmente.
         """
         prods, ids, ref, busqueda_tipo = _buscar_producto_core(referencia)
         if not prods:
@@ -1704,12 +1693,10 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
     @tool
     def buscar_producto_cotizacion(referencia: str) -> str:
-        """Buscar productos para cotización. Envía tarjetas WhatsApp y obtiene precio a qty=1 por cada resultado.
-
-        USAR cuando el cliente menciona un producto con intención de compra.
-        Registra TODOS los productos encontrados (max 3) en el carrito con precio a qty=1.
-        Si el cliente elige uno, usa seleccionar_linea_carrito(product_id).
-        Si el cliente pide distinta cantidad, llama obtener_precio(product_id, partner_id, qty).
+        """Buscar productos para cotización: envía tarjetas WhatsApp y registra hasta 3
+        resultados en el carrito con precio a qty=1. USAR con intención de compra.
+        Si el cliente elige uno: seleccionar_linea_carrito(product_id).
+        Si pide otra cantidad: obtener_precio(product_id, partner_id, qty).
         """
         prods, ids, ref, busqueda_tipo = _buscar_producto_core(referencia)
         if not prods:
@@ -1798,11 +1785,14 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 f"escalar_a_asesor si lo necesita."
             )
         try:
-            order_id = odoo.create("sale.order", {
+            order_vals = {
                 "partner_id": partner_id,
                 "state": "draft",
                 "payment_method_id": 215,
-            })
+            }
+            if _bot_pricelist_id:
+                order_vals["pricelist_id"] = _bot_pricelist_id
+            order_id = odoo.create("sale.order", order_vals)
             line_id = odoo.create("sale.order.line", {
                 "order_id": order_id,
                 "product_id": product_id,
@@ -1853,14 +1843,9 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
     @tool
     def crear_cotizacion(partner_id: int, nota: str = "") -> str:
-        """Crear una nueva cotización vacía para un cliente.
-
-        Retorna el ORDER_ID numérico que debes usar en agregar_linea_cotizacion
-        y en generar_link_cotizacion. NO confundir con invoice_id.
-
-        Flujo obligatorio después de esta tool:
-        1. agregar_linea_cotizacion(order_id=ORDER_ID, ...)  por cada producto
-        2. generar_link_cotizacion(order_id=ORDER_ID)        cuando el cliente pida el link
+        """Crear una cotización vacía para un cliente. Retorna el ORDER_ID numérico que
+        debes usar en agregar_linea_cotizacion y generar_link_cotizacion — no confundir
+        con invoice_id.
         """
         # Usar la empresa (commercial_partner_id) en lugar del contacto individual
         effective_partner_id = _commercial_id(partner_id) or partner_id
@@ -1885,13 +1870,10 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
     @tool
     def agregar_linea_cotizacion(order_id: int, product_id: int, cantidad: float = 1.0) -> str:
-        """Agregar o actualizar un producto en una cotización existente.
-
-        Si el producto ya existe en la cotización actualiza la cantidad; si no, agrega línea nueva.
-        Odoo aplica la pricelist del cliente automáticamente.
-
-        IMPORTANTE: order_id debe ser el ID numérico de la BD retornado por crear_cotizacion
-        (ej: ID:NNNNN), NO el número del nombre de la cotización (ej: S47836 tiene un ID interno diferente).
+        """Agregar o actualizar un producto en una cotización (si la línea ya existe,
+        actualiza la cantidad). Aplica la pricelist del cliente automáticamente.
+        order_id = ID numérico de BD retornado por crear_cotizacion — NO el número
+        del nombre de la cotización (S47836 tiene un ID interno distinto).
         """
         # Las cotizaciones se crean a nombre de la EMPRESA (commercial_partner_id)
         # aunque escriba un contacto — validar contra toda la familia de la empresa
@@ -2013,19 +1995,11 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
     @tool
     def registrar_espera_respuesta(mensaje_followup: str = "") -> str:
-        """Registra que el bot está esperando respuesta del cliente.
-
-        Llama esta herramienta SIEMPRE al final de una respuesta que espera reply del cliente:
-        - Después de enviar tarjetas de precio (modo consulta)
-        - Después de presentar resumen de cotización
-        - Después de cualquier pregunta que espera decisión del cliente
-
-        Si el cliente no responde en 5 minutos, Odoo enviará automáticamente el
-        mensaje de seguimiento indicado en mensaje_followup.
-
-        No dejes mensaje_followup vacío — usa un texto apropiado al contexto:
-        - Modo precio: "¿Te interesa que te prepare una cotización? 😊"
-        - Modo cotización: "Quedé a la espera de tu confirmación 🛒 ¿Necesitas algo más?"
+        """Registra que el bot quedó esperando respuesta del cliente. Llamar al final de
+        cada respuesta que espera decisión (tarjetas de precio, resumen de cotización,
+        pregunta). Si no responde en 5 min, Odoo envía mensaje_followup automáticamente —
+        nunca lo dejes vacío; usa un texto acorde al contexto
+        (ej: "¿Te interesa que te prepare una cotización? 😊").
         """
         if not _session_id:
             return "ok (sin sesión)"
@@ -2239,10 +2213,10 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
     @tool
     def generar_link_cotizacion(order_id: int) -> str:
         """Generar el link del portal para que el cliente revise y pague su cotización.
-
-        USAR SIEMPRE que el cliente pida 'link de pago', 'link', 'el pago', 'cómo pago', etc.
-        El cliente paga directamente en el portal — la orden se confirma automáticamente al pagar.
-        El bot NO confirma ni factura. NUNCA uses confirmar_cotizacion_y_link_pago."""
+        USAR cuando pidan "link de pago", "link", "el pago", "cómo pago". El pago
+        confirma la orden automáticamente; el bot NO confirma ni factura.
+        NUNCA uses confirmar_cotizacion_y_link_pago.
+        """
         _completo, _faltan = _estado_datos_facturacion()
         if not _completo:
             return (
@@ -2392,8 +2366,13 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
     @tool
     def listar_pedidos_cliente(partner_id: int, limit: int = 5, estado: str = "sale") -> str:
-        """Listar pedidos/cotizaciones de un cliente. estado: draft=borradores, sent=enviadas, sale=confirmados, done=entregados, all=todos. Incluye ID interno para agregar_linea_cotizacion o estado_entrega.
-        USAR PROACTIVAMENTE cuando el cliente mencione "lo mismo de siempre", "lo que nos venden cada mes", "el pedido habitual", "lo de siempre", "lo que siempre pido", "lo que compramos normalmente" o frases similares de compra recurrente — llamar con estado="sale" para ver historial de confirmados y deducir qué productos necesita sin pedirle la referencia."""
+        """Listar pedidos/cotizaciones de un cliente, de la más reciente a la más antigua.
+        estado: draft=borradores, sent=enviadas, sale=confirmados, done=entregados, all=todos.
+        Incluye el ID interno para agregar_linea_cotizacion o estado_entrega.
+        USAR PROACTIVAMENTE con estado="sale" cuando el cliente hable de compra recurrente
+        ("lo de siempre", "el pedido habitual", "lo que compramos cada mes") para deducir
+        qué necesita sin pedirle la referencia.
+        """
         import datetime as _dt
         estado_filter = {
             "draft": ["draft"],
@@ -2709,25 +2688,16 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
     @tool
     def escalar_a_asesor(motivo: str, resumen: str = "") -> str:
-        """Transfiere la conversacion a un asesor humano y detiene las respuestas del bot.
+        """Transfiere la conversación a un asesor humano y detiene las respuestas del bot.
 
-        USAR OBLIGATORIAMENTE cuando:
-        - El cliente pide hablar con su asesora o una persona real
-        - El cliente expresa molestia, reclamo formal o queja grave
-        - La solicitud requiere negociacion de precio, descuento especial o credito
-        - No puedes resolver la consulta con las herramientas disponibles
+        USAR cuando: el cliente pide una persona real, expresa molestia o reclamo formal,
+        pide descuento especial / negociación / crédito, o no puedes resolver con tus herramientas.
 
-        Al llamar esta herramienta:
-        1. PRIMERO genera un mensaje calido al cliente: "Un asesor de nuestro equipo te
-           escribirá pronto. 🙏"
-           NUNCA menciones el nombre del asesor ni prometas una hora especifica.
-           El mensaje debe ser siempre generico y sin compromisos de tiempo.
-        2. LUEGO llama esta tool con motivo y resumen del contexto
-        3. NO respondas nada mas despues — el asesor toma el control
+        Antes de llamar: envía UN mensaje cálido genérico ("Un asesor de nuestro equipo te
+        escribirá pronto. 🙏") — sin nombre de asesor ni hora prometida. Después de llamar,
+        no respondas nada más: el asesor toma el control.
 
-        Args:
-            motivo: razon especifica (ej: "cliente pide hablar con Daniela")
-            resumen: contexto clave para el asesor (ej: "quiere 6 toner 85A, cotizacion S47093")
+        motivo: razón específica. resumen: contexto clave para el asesor (productos, cotización).
         """
         if ch_id:
             _esc_at = datetime.now(timezone.utc).isoformat()
@@ -2746,23 +2716,6 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 logger.warning("escalar_a_asesor: no pudo postear nota canal=%s: %s", ch_id, _e)
         return "ESCALADO_OK: asesor humano tomara el control. No respondas mas mensajes."
 
-    @tool
-    def solicitar_reclasificacion(motivo: str = "") -> str:
-        """Solicitar que este mensaje sea reclasificado y enviado al sub-agente correcto.
-
-        USAR cuando el mensaje del cliente NO corresponde al dominio de este agente.
-        Ejemplos: agente de cotizaciones recibe pregunta de soporte, agente de facturas
-        recibe solicitud de inscribir empresa, agente de precios recibe solicitud de pago.
-
-        Al llamar esta herramienta:
-        - NO generes ningun texto de respuesta al cliente
-        - NO expliques por que no puedes ayudar
-        - Solo llama esta tool y detente
-
-        El sistema reenviara automaticamente el mensaje al sub-agente correcto."""
-        if ch_id:
-            _merge_bot_context({"v3_handoff": True, "v3_handoff_motivo": motivo})
-        return "OK: reclasificacion solicitada"
 
     @tool
     def limpiar_carrito() -> str:
@@ -2838,12 +2791,9 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
     @tool
     def seleccionar_linea_carrito(product_id: int) -> str:
-        """Marcar un producto del carrito como seleccionado para cotizar.
-
-        USAR cuando el cliente elige uno de varios productos mostrados.
-        Solo la línea marcada se incluirá en crear_cotizacion_desde_carrito.
-        Los demás productos del carrito quedan deseleccionados.
-        Para cotizar TODOS, NO llames esta herramienta — usa directamente crear_cotizacion_desde_carrito.
+        """Marcar UN producto del carrito para cotizar (deselecciona los demás).
+        USAR cuando el cliente elige uno de varios mostrados. Para cotizar TODOS,
+        usa directamente crear_cotizacion_desde_carrito sin llamar esta.
         """
         carrito_id = _get_carrito_id()
         if not carrito_id:
@@ -3224,10 +3174,10 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
     @tool
     def agregar_envio_orden(order_id: int) -> str:
-        """Agrega automaticamente el metodo de envio a una orden de venta.
-        Odoo selecciona el carrier segun la direccion del cliente y calcula el costo por peso.
-        SIEMPRE llamar esta tool antes de enviar la cotizacion al cliente en el bot de usuario final.
-        No llamar si el envio ya fue agregado (verificar con obtener_cotizacion primero)."""
+        """Agrega el método de envío a la orden (Odoo elige el carrier según la dirección
+        y calcula el costo por peso). Llamar antes de enviar la cotización si el cliente
+        pidió domicilio; NO llamar si el envío ya está (verificar con obtener_cotizacion).
+        """
         try:
             # Verificar que la orden existe y no tiene envio ya agregado
             orders = odoo.read("sale.order", [order_id], ["name", "state", "carrier_id", "amount_total"])
@@ -3287,13 +3237,9 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
     @tool
     def verificar_historial_envio(partner_id: int) -> str:
-        """Verifica el metodo de entrega configurado en el cliente.
-
-        Primero revisa property_delivery_carrier_id del partner.
-        Si esta configurado, indica al agente que use agregar_envio_orden automaticamente.
-        Si no, revisa historial de pedidos para inferir preferencia.
-
-        USAR antes de crear cotizacion cuando el cliente confirma compra.
+        """Verifica el método de entrega preferido del cliente (carrier configurado en el
+        partner, o inferido de su historial de pedidos). USAR antes de crear cotización
+        cuando confirma compra; si retorna carrier, usa agregar_envio_orden.
         """
         if not partner_id:
             return "No hay cliente activo para revisar."
@@ -3397,15 +3343,12 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
     def buscar_referencias_mensaje(mensaje: str) -> str:
         """Busca referencias de productos mencionadas en el mensaje del cliente.
 
-        Herramienta PRINCIPAL de busqueda para INTENCION DE COMPRA.
-        Extrae automaticamente multiples referencias y cantidades de un mensaje.
-        Maneja la degradacion: exacto -> similar -> digitos -> no encontrado.
-        Registra los productos encontrados en el carrito.
+        Herramienta PRINCIPAL para INTENCIÓN DE COMPRA ("necesito", "cotízame", "quiero",
+        "factúrame"): extrae todas las referencias y cantidades, maneja la degradación
+        exacto → similar → dígitos, y registra lo encontrado en el carrito.
+        Para consulta de precio/información usa buscar_producto (envía tarjetas).
 
-        USA ESTE TOOL cuando el cliente dice: necesito, cotizame, quiero, pide, facturame.
-        USA buscar_producto() para consultas de precio o informacion (envia tarjetas).
-
-        Retorna: PRODUCT_ID, nombre, cantidad y nivel de confianza por cada referencia.
+        Retorna PRODUCT_ID, nombre, cantidad y nivel de confianza por cada referencia.
         """
         import re as _re
 
@@ -3707,7 +3650,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         listar_tickets_cliente, crear_ticket_garantia, obtener_ticket, actualizar_ticket,
         verificar_garantia, registrar_solucion,
         registrar_pago, listar_pagos, enviar_estado_cuenta_whatsapp, crear_acuerdo_pago,
-        escalar_a_asesor, solicitar_reclasificacion, limpiar_carrito, ver_carrito,
+        escalar_a_asesor, limpiar_carrito, ver_carrito,
         seleccionar_linea_carrito, crear_cotizacion_desde_carrito,
         search_contacts, search_odoo_model, buscar_producto_ficha, web_search,
         consultar_faq,

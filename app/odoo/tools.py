@@ -626,6 +626,11 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         lineas.append(f"Nombre: {res.get('nombre') or 'N/A'}")
         lineas.append(f"Correo: {res['correo']}" if res["tiene_correo"] else "Correo: NO tiene — hay que pedirlo.")
         lineas.append(f"Teléfono: {res['telefono']}" if res["tiene_telefono"] else "Teléfono: NO tiene — hay que pedirlo.")
+        _term = res.get("payment_term") or "Pago de Contado"
+        if res.get("es_credito"):
+            lineas.append(f"Términos de pago: {_term} (CRÉDITO — NO preguntes método de pago, solo confirma el pedido)")
+        else:
+            lineas.append(f"Términos de pago: {_term} (CONTADO — pregunta método de pago antes de cerrar, ver sección 7b)")
         direcciones = res.get("direcciones") or []
         if not direcciones:
             lineas.append("Direcciones de envío: NINGUNA guardada — hay que pedirla.")
@@ -1967,9 +1972,10 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
     @tool
     def obtener_cotizacion(order_id: int) -> str:
-        """Obtener detalles de una cotización: cliente, estado, líneas, total."""
+        """Obtener detalles de una cotización: cliente, estado, líneas, subtotal, IVA y total."""
         recs = odoo.read("sale.order", [order_id],
-                         ["name","partner_id","state","amount_total","date_order","order_line"])
+                         ["name","partner_id","state","amount_untaxed","amount_tax",
+                          "amount_total","date_order","order_line"])
         if not recs:
             return f"Cotización {order_id} no encontrada."
         o = recs[0]
@@ -1991,7 +1997,12 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         return (f"Cotización: {o.get('name')}\nCliente: {_m2o(o.get('partner_id'))}\n"
                 f"Estado: {state_map.get(o.get('state',''), o.get('state',''))}\n"
                 f"Fecha: {_fmt_date(str(o.get('date_order','') or ''))}\n"
-                f"Total: {_fmt_currency(o.get('amount_total',0))}{lines_text}")
+                f"Subtotal (antes de IVA): {_fmt_currency(o.get('amount_untaxed',0))}\n"
+                f"IVA: {_fmt_currency(o.get('amount_tax',0))}\n"
+                f"Total (con IVA): {_fmt_currency(o.get('amount_total',0))}{lines_text}\n\n"
+                f"IMPORTANTE: la diferencia entre el subtotal y el total es SIEMPRE el IVA. "
+                f"NO hay cargo de envío/domicilio salvo que aparezca como línea de producto "
+                f"explícita arriba — nunca inventes ni asumas un costo de envío.")
 
     @tool
     def registrar_espera_respuesta(mensaje_followup: str = "") -> str:
@@ -2015,12 +2026,23 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
     @tool
     def confirmar_orden(order_id: int) -> str:
-        """Confirmar una cotización y convertirla en pedido de venta."""
+        """Confirmar una cotización y convertirla en pedido de venta, SIN facturar.
+
+        USAR para contra entrega, y también para clientes de CRÉDITO (ver
+        "Términos de pago" en consultar_datos_facturacion): en ambos casos
+        se confirma el pedido pero la factura la genera después un asesor
+        manualmente — no factures tú automáticamente, reduce errores y deja
+        el control de facturación al equipo de cartera.
+        """
         try:
             odoo.execute_kw("sale.order", "action_confirm", [[order_id]])
-            recs = odoo.read("sale.order", [order_id], ["name"])
-            name = recs[0]["name"] if recs else str(order_id)
-            return f"✅ Orden {name} confirmada."
+            recs = odoo.read("sale.order", [order_id], ["name", "amount_total"])
+            if not recs:
+                return f"✅ Orden {order_id} confirmada."
+            name = recs[0]["name"]
+            total = recs[0].get("amount_total", 0)
+            return (f"✅ Orden {name} confirmada — Total: {_fmt_currency(total)}. "
+                    f"Usa este total exacto al confirmarle al cliente, no un valor calculado de memoria.")
         except Exception as e:
             return f"Error al confirmar: {str(e)}"
 
@@ -2541,6 +2563,34 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             return result or "✅ PDF enviado."
         except Exception as e:
             return f"Error enviando PDF: {str(e)}"
+
+    @tool
+    def enviar_factura_completa_correo(invoice_id: int, email: str) -> str:
+        """Reenviar una factura YA emitida por correo con el paquete legal completo
+        (PDF + XML/CUDE aceptado por la DIAN) — el mismo adjunto que se envía al
+        validar la factura, no un PDF suelto.
+
+        USAR cuando el cliente pida la factura "completa", "con el XML", "la
+        electrónica", o la pida a un correo específico de facturación (puede ser
+        distinto al registrado). NO uses enviar_factura_pdf_whatsapp para esto —
+        esa solo manda un PDF por WhatsApp, sin XML.
+        Requiere el ID interno obtenido de listar_facturas (el número después de "ID:").
+        """
+        try:
+            result = odoo.execute_kw(
+                "account.move", "jwb_enviar_factura_completa_correo",
+                [[invoice_id], email],
+            )
+        except Exception as e:
+            return f"Error enviando la factura: {str(e)[:200]}"
+
+        if not result or not result.get("ok"):
+            return f"❌ {(result or {}).get('error', 'No se pudo enviar la factura.')}"
+
+        return (
+            f"✅ Factura {result['factura']} enviada a {result['email']} "
+            f"con el PDF y el XML/CUDE de la DIAN."
+        )
 
     # ── TICKETS / SOPORTE ─────────────────────────────────────────────────
 

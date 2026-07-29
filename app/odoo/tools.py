@@ -221,6 +221,65 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         _commercial_cache[base] = cid
         return cid
 
+    def _es_del_cliente(order_partner):
+        """True si order_partner (m2o de sale.order.partner_id) es el cliente actual,
+        su empresa, o un contacto de ella."""
+        if not _partner_id:
+            return True
+        opid = order_partner[0] if isinstance(order_partner, (list, tuple)) else int(order_partner or 0)
+        _cid = _commercial_id()
+        if opid in (_partner_id, _cid):
+            return True
+        try:
+            return bool(odoo.search_read(
+                "res.partner",
+                [("id", "child_of", _cid), ("id", "=", opid)], ["id"], 1,
+            ))
+        except Exception:
+            return False
+
+    def _resolver_order_id_cliente(order_id: int, estados=("draft", "sent", "sale")):
+        """Valida que order_id pertenezca al cliente actual (o su empresa); si no,
+        intenta resolverlo por nombre dentro de la familia del cliente (cubre el caso
+        de que el LLM haya confundido el order_id numérico con los dígitos del NOMBRE
+        de la cotización, ej. 'S53654' -> 53654, que puede coincidir por azar con el
+        ID real de una orden de OTRO cliente).
+
+        Retorna (order_id_resuelto, record) o (None, None) si no se pudo resolver de
+        forma segura para este cliente — en ese caso el llamador NO debe operar sobre
+        el order_id original.
+        """
+        recs = odoo.search_read(
+            "sale.order",
+            [("id", "=", order_id), ("state", "in", list(estados))],
+            ["id", "name", "partner_id"], limit=1,
+        )
+        if recs and _es_del_cliente(recs[0].get("partner_id")):
+            return order_id, recs[0]
+
+        if not _partner_id:
+            # Sin cliente en contexto no hay forma segura de validar — usar tal cual.
+            return (order_id, recs[0]) if recs else (None, None)
+
+        alt = odoo.search_read(
+            "sale.order",
+            [
+                ("partner_id", "child_of", _commercial_id()),
+                ("name", "ilike", str(order_id)),
+                ("state", "in", list(estados)),
+            ],
+            ["id", "name", "partner_id"], limit=1,
+        )
+        if alt:
+            if recs:
+                logger.warning(
+                    "_resolver_order_id_cliente: order_id=%s no pertenece al partner %s "                    "(es de partner=%s) — resuelto como %s (ID:%s) por nombre",
+                    order_id, _partner_id, recs[0].get("partner_id"), alt[0]["name"], alt[0]["id"],
+                )
+            return alt[0]["id"], alt[0]
+
+        return None, None
+
     def _merge_bot_context(updates: dict):
         """Fusiona updates en jwb_bot_context del canal sin sobrescribir otras claves."""
         if not ch_id:
@@ -516,10 +575,16 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
     @tool
     def consultar_faq(tema: str) -> str:
         """Consultar preguntas frecuentes de la empresa: métodos de pago, garantía, envíos,
-        horario, devoluciones. USAR para políticas/procesos generales, no para productos
-        específicos.
+        horario, devoluciones, documentos corporativos (RUT, cámara de comercio,
+        certificado bancario, etc). USAR para políticas/procesos generales, no para
+        productos específicos.
+
+        Si la respuesta indica un documento disponible, usa enviar_documento_faq(faq_id)
+        para enviarlo — respeta la instrucción de confirmación si la trae.
         """
         bot_id = (odoo_context or {}).get("bot_id")
+        campos = ["id", "pregunta", "respuesta", "categoria", "bot_id",
+                  "documento_filename", "requiere_confirmacion"]
         try:
             # Buscar FAQs que coincidan: primero específicas del bot, luego globales
             domain_bot = [
@@ -528,26 +593,62 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             ]
             if bot_id:
                 domain_bot.append(("bot_id", "=", bot_id))
-            faqs = odoo.search_read(
-                "jpc.whatsapp.bot.faq",
-                domain_bot,
-                ["pregunta", "respuesta", "categoria", "bot_id"],
-                limit=3,
-            )
+            faqs = odoo.search_read("jpc.whatsapp.bot.faq", domain_bot, campos, limit=3)
             # Si no encontró del bot específico, buscar globales
             if not faqs and bot_id:
                 faqs = odoo.search_read(
                     "jpc.whatsapp.bot.faq",
                     [("active", "=", True), ("pregunta", "ilike", tema), ("bot_id", "=", False)],
-                    ["pregunta", "respuesta", "categoria"],
-                    limit=3,
+                    campos, limit=3,
                 )
             if not faqs:
                 return f"No encontré información sobre '{tema}'. Escala al asesor si es urgente."
-            return "\n\n".join(f.get("respuesta", "") for f in faqs if f.get("respuesta"))
+
+            partes = []
+            for f in faqs:
+                texto = f.get("respuesta", "") or ""
+                nombre_doc = f.get("documento_filename")
+                if nombre_doc:
+                    if f.get("requiere_confirmacion"):
+                        texto += (
+                            f"\n[Tengo el documento '{nombre_doc}' listo, pero esta FAQ "
+                            f"requiere confirmación previa — NO lo envíes todavía. Pregúntale "
+                            f"al cliente si esto es exactamente lo que necesita. Solo si "
+                            f"confirma explícitamente, llama "
+                            f"enviar_documento_faq(faq_id={f['id']}).]"
+                        )
+                    else:
+                        texto += (
+                            f"\n[Documento disponible: '{nombre_doc}'. Usa "
+                            f"enviar_documento_faq(faq_id={f['id']}) para enviarlo.]"
+                        )
+                if texto:
+                    partes.append(texto)
+            return "\n\n".join(partes)
         except Exception as e:
             logger.warning("consultar_faq: %s", e)
             return f"No pude consultar la información sobre '{tema}'."
+
+    @tool
+    def enviar_documento_faq(faq_id: int) -> str:
+        """Enviar por WhatsApp el documento adjunto de una FAQ (ej: certificado bancario,
+        RUT, cámara de comercio). Usa el faq_id retornado por consultar_faq.
+
+        Si consultar_faq indicó que esa FAQ requiere confirmación previa, NO llames esta
+        tool hasta que el cliente haya confirmado explícitamente que es lo que necesita.
+        """
+        if not ch_id:
+            return "No hay canal activo para enviar el documento."
+        try:
+            result = odoo.execute_kw(
+                "jpc.whatsapp.bot.funciones.negocio",
+                "action_enviar_documento_faq_agente",
+                [[]],
+                {"faq_id": faq_id, "channel_id": ch_id},
+            )
+            return result or "✅ Documento enviado."
+        except Exception as e:
+            return f"Error enviando el documento: {str(e)}"
 
     @tool
     def buscar_cliente(query: str = "", phone: str = "", limit: int = 5) -> str:
@@ -1669,8 +1770,12 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 return _msg_repuesto_no_encontrado(busqueda_tipo, referencia)
             return (
                 f"No encontre productos para '{referencia}'.\n"
-                f"Pidele al cliente la referencia exacta del cartucho "
-                f"(ej: Q2612A, 85A, CE285A) o el modelo exacto de impresora."
+                f"Dile al cliente algo como: 'No encuentro esta referencia en nuestro "
+                f"catálogo actualmente, pero no te preocupes 😊 Voy a transferir tu "
+                f"conversación a uno de nuestros asesores para que consulte la "
+                f"disponibilidad con nuestros proveedores locales y pueda prepararte "
+                f"una cotización ajustada a lo que necesitas.' Luego usa escalar_a_asesor "
+                f"con motivo 'Producto no encontrado en catálogo: {referencia}'."
             )
         logger.info("buscar_producto: '%s' -> IDs=%s", ref, ids)
         # Resumen de variantes: mixto (Megatoner+Original) -> todo junto en secciones
@@ -1717,8 +1822,12 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 return _msg_repuesto_no_encontrado(busqueda_tipo, referencia)
             return (
                 f"No encontre productos para '{referencia}'.\n"
-                f"Pidele al cliente la referencia exacta del cartucho "
-                f"(ej: Q2612A, 85A, CE285A) o el modelo exacto de impresora."
+                f"Dile al cliente algo como: 'No encuentro esta referencia en nuestro "
+                f"catálogo actualmente, pero no te preocupes 😊 Voy a transferir tu "
+                f"conversación a uno de nuestros asesores para que consulte la "
+                f"disponibilidad con nuestros proveedores locales y pueda prepararte "
+                f"una cotización ajustada a lo que necesitas.' Luego usa escalar_a_asesor "
+                f"con motivo 'Producto no encontrado en catálogo: {referencia}'."
             )
         logger.info("buscar_producto_cotizacion: '%s' -> IDs=%s", ref, ids)
         # Resumen de variantes: mixto (Megatoner+Original) -> todo junto en secciones
@@ -1880,60 +1989,12 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         order_id = ID numérico de BD retornado por crear_cotizacion — NO el número
         del nombre de la cotización (S47836 tiene un ID interno distinto).
         """
-        # Las cotizaciones se crean a nombre de la EMPRESA (commercial_partner_id)
-        # aunque escriba un contacto — validar contra toda la familia de la empresa
-        _cid = _commercial_id() or _partner_id
-
-        def _es_del_cliente(order_partner):
-            """True si la orden es del cliente actual, su empresa o un contacto de ella."""
-            if not _partner_id:
-                return True
-            opid = order_partner[0] if isinstance(order_partner, (list, tuple)) else int(order_partner or 0)
-            if opid in (_partner_id, _cid):
-                return True
-            try:
-                return bool(odoo.search_read(
-                    "res.partner",
-                    [("id", "child_of", _cid), ("id", "=", opid)], ["id"], 1,
-                ))
-            except Exception:
-                return False
-
-        orders = odoo.search_read(
-            "sale.order",
-            [("id", "=", order_id), ("state", "in", ["draft", "sent"])],
-            ["id", "name", "partner_id"], limit=1,
-        )
-
-        # Si no se encontró por ID, o pertenece a otro cliente, resolver por nombre
-        if _partner_id and (not orders or not _es_del_cliente(orders[0].get("partner_id"))):
-            alt = odoo.search_read(
-                "sale.order",
-                [
-                    ("partner_id", "child_of", _cid),
-                    ("name", "ilike", str(order_id)),
-                    ("state", "in", ["draft", "sent"]),
-                ],
-                ["id", "name", "partner_id"], limit=1,
-            )
-            if alt:
-                logger.warning(
-                    "agregar_linea_cotizacion: order_id=%s no pertenece al partner %s — "                    "resuelto como %s (ID:%s) por nombre",
-                    order_id, _partner_id, alt[0]["name"], alt[0]["id"],
-                )
-                order_id = alt[0]["id"]
-                orders = alt
-
-        if not orders:
+        order_id, order_rec = _resolver_order_id_cliente(order_id, estados=("draft", "sent"))
+        if not order_id:
             return (
-                f"❌ Cotización ID:{order_id} no encontrada o ya confirmada. "                f"Llama crear_cotizacion() para crear una nueva."
+                f"❌ Cotización no encontrada o no pertenece al cliente actual. "                f"Llama crear_cotizacion() para crear una nueva."
             )
-
-        # Validar que la orden pertenece al cliente actual (o a su empresa)
-        if not _es_del_cliente(orders[0].get("partner_id")):
-            return (
-                f"❌ La cotización {orders[0]['name']} no pertenece al cliente actual. "                f"Verifica el ID de la cotización."
-            )
+        orders = [order_rec]
 
         prods = odoo.read("product.product", [product_id], ["name", "jpc_pos_name", "default_code"])
         if not prods:
@@ -1989,7 +2050,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             prod_names = {}
             if prod_ids:
                 pp = odoo.read("product.product", prod_ids, ["jpc_pos_name", "name", "default_code"])
-                prod_names = {p["id"]: (p.get("default_code") or p.get("jpc_pos_name") or p["name"]) for p in pp}
+                prod_names = {p["id"]: (p.get("jpc_pos_name") or p.get("name") or p.get("default_code")) for p in pp}
             items = [f"  • {prod_names.get(l['product_id'][0], _m2o(l.get('product_id')))} "
                      f"{_fmt_currency(l.get('price_unit',0))} × {l.get('product_uom_qty',0):.0f} = "
                      f"{_fmt_currency(l.get('price_subtotal',0))}" for l in lines]
@@ -2034,6 +2095,11 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         manualmente — no factures tú automáticamente, reduce errores y deja
         el control de facturación al equipo de cartera.
         """
+        order_id, order_rec = _resolver_order_id_cliente(order_id, estados=("draft", "sent"))
+        if not order_id:
+            return (
+                f"❌ Cotización no encontrada o no pertenece al cliente actual — "                f"NO se confirmó nada. Verifica el ORDER_ID (usa el numérico de "                f"crear_cotizacion/agregar_linea_cotizacion, no los dígitos del nombre)."
+            )
         try:
             odoo.execute_kw("sale.order", "action_confirm", [[order_id]])
             recs = odoo.read("sale.order", [order_id], ["name", "amount_total"])
@@ -3228,6 +3294,11 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         y calcula el costo por peso). Llamar antes de enviar la cotización si el cliente
         pidió domicilio; NO llamar si el envío ya está (verificar con obtener_cotizacion).
         """
+        order_id, _rec = _resolver_order_id_cliente(order_id, estados=("draft", "sent"))
+        if not order_id:
+            return (
+                "❌ Cotización no encontrada o no pertenece al cliente actual — "                "NO se agregó envío. Verifica el ORDER_ID (usa el numérico de "                "crear_cotizacion/agregar_linea_cotizacion, no los dígitos del nombre)."
+            )
         try:
             # Verificar que la orden existe y no tiene envio ya agregado
             orders = odoo.read("sale.order", [order_id], ["name", "state", "carrier_id", "amount_total"])

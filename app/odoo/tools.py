@@ -1537,6 +1537,14 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         def _get_marca_filter(ref_text):
             """Detecta marca OEM en el texto. Retorna (tmpl_filter, ref_sin_marca).
             tmpl_filter es None si no hay marca o no hay productos con esa marca.
+
+            Reconoce la marca como palabra separada ("HP 106A") y también
+            pegada al inicio de un token seguido de dígitos ("HP4103"). En
+            este segundo caso SOLO dispara si el prefijo coincide con una
+            marca/alias real de jpc.product.brand.oem — nunca con una letra
+            genérica. Esto evita falsos positivos: "M400"/"P1102" son
+            nomenclatura propia del fabricante (MFP/Printer), no marcas, y
+            deben quedar intactos.
             """
             try:
                 marcas = odoo.search_read(
@@ -1557,13 +1565,34 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                     if a:
                         lookup[a] = m["id"]
             ref_tokens = _re.findall(r'[a-zA-Z0-9]+', ref_text.lower())
+
             brand_id = None
-            brand_token = None
+            brand_token = None      # texto exacto a reemplazar en ref_text
+            brand_replacement = ''  # por qué reemplazarlo (vacío o el resto pegado)
+
+            # 1) Marca como palabra separada (comportamiento original).
             for tok in ref_tokens:
                 if tok in lookup:
                     brand_id = lookup[tok]
                     brand_token = tok
                     break
+
+            # 2) Marca pegada al inicio de un token, seguida de dígito
+            #    (ej. "HP4103" -> marca "hp" + resto "4103"). Se prueban las
+            #    claves de marca más largas primero (ej. "hpe" antes que
+            #    "hp") para no cortar de más.
+            if not brand_id:
+                marca_keys_sorted = sorted(lookup.keys(), key=len, reverse=True)
+                for tok in ref_tokens:
+                    for key in marca_keys_sorted:
+                        if len(tok) > len(key) and tok.startswith(key) and tok[len(key)].isdigit():
+                            brand_id = lookup[key]
+                            brand_token = tok
+                            brand_replacement = tok[len(key):]
+                            break
+                    if brand_id:
+                        break
+
             if not brand_id:
                 return None, ref_text
             try:
@@ -1582,7 +1611,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             tmpl_ids_marca = [t["id"] for t in tmpls]
             ref_sin = _re.sub(
                 r'(?<![a-zA-Z0-9])' + _re.escape(brand_token) + r'(?![a-zA-Z0-9])',
-                '', ref_text, flags=_re.IGNORECASE,
+                brand_replacement, ref_text, flags=_re.IGNORECASE,
             ).strip()
             ref_sin = _re.sub(r' {2,}', ' ', ref_sin).strip()
             logger.debug("_buscar_producto_core: marca OEM detectada id=%s token=%r, ref_sin=%r", brand_id, brand_token, ref_sin)

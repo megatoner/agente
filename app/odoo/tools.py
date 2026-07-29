@@ -280,6 +280,77 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
         return None, None
 
+    def _verificar_stock_o_sugerir(product_id: int, cantidad: float = 1.0):
+        """Bloquea agregar a una cotización un producto sin stock suficiente en el
+        almacén del bot. Si está agotado, busca variantes hermanas (ej. con
+        chip/sin chip del mismo tóner — MISMO código entre paréntesis del
+        jpc_pos_name, ej. '(M-W1500X)', aunque el jpc_pos_name completo difiera
+        porque incluye la palabra 'con chip'/'sin chip') que SÍ tengan stock,
+        para poder ofrecerlas de inmediato en vez de solo rechazar.
+
+        Retorna None si hay stock suficiente (puede proceder). Si no, retorna un
+        mensaje de error con instrucción para el agente — el llamador NO debe
+        crear la línea.
+        """
+        try:
+            prods = odoo.read(
+                "product.product", [product_id],
+                ["qty_available", "jpc_pos_name", "name", "product_tmpl_id"],
+                **({"context": _wh_ctx} if _warehouse_id else {}),
+            )
+        except Exception as e:
+            logger.warning("_verificar_stock_o_sugerir: error leyendo producto=%s: %s", product_id, e)
+            return None  # no bloquear por un error de lectura — mejor dejar pasar
+        if not prods:
+            return None
+        p = prods[0]
+        disponible = p.get("qty_available") or 0
+        if disponible >= cantidad:
+            return None
+
+        nombre = p.get("jpc_pos_name") or p.get("name") or f"producto {product_id}"
+        msg = (
+            f"❌ '{nombre}' está AGOTADO (disponible: {disponible:.0f}, solicitado: "
+            f"{cantidad:.0f}). NO se agregó a la cotización.\n"
+        )
+        try:
+            pos_name = p.get("jpc_pos_name") or ""
+            tmpl = p.get("product_tmpl_id")
+            tmpl_id = tmpl[0] if isinstance(tmpl, (list, tuple)) else tmpl
+            m = re.search(r'\(([^)]+)\)', pos_name)
+            codigo = m.group(1).strip() if m else ""
+            codigo_base = re.sub(r'\s*sc$', '', codigo, flags=re.IGNORECASE).strip()
+            if codigo_base:
+                hermanos = odoo.search_read(
+                    "product.template",
+                    [("jpc_pos_name", "ilike", codigo_base), ("id", "!=", tmpl_id), ("active", "=", True)],
+                    ["id"], limit=10,
+                )
+                tmpl_ids = [h["id"] for h in hermanos]
+                if tmpl_ids:
+                    variantes = odoo.search_read(
+                        "product.product",
+                        [("product_tmpl_id", "in", tmpl_ids), ("active", "=", True)],
+                        ["id", "default_code", "display_name", "qty_available"],
+                        limit=10,
+                        **({"context": _wh_ctx} if _warehouse_id else {}),
+                    )
+                    alternativas = [v for v in variantes if (v.get("qty_available") or 0) >= cantidad]
+                    if alternativas:
+                        msg += "Alternativas disponibles (misma referencia, otra variante):\n"
+                        for v in alternativas:
+                            msg += (f"  • {v.get('display_name')} (product_id={v['id']}) — "
+                                    f"stock: {v.get('qty_available'):.0f}\n")
+                        msg += "Ofrécele estas opciones al cliente en vez de la agotada."
+                    else:
+                        msg += "No hay variantes alternativas con stock. Ofrece escalar a asesor."
+                else:
+                    msg += "No hay variantes alternativas con stock. Ofrece escalar a asesor."
+        except Exception as e:
+            logger.warning("_verificar_stock_o_sugerir: error buscando alternativas: %s", e)
+            msg += "No pude buscar alternativas. Ofrece escalar a asesor."
+        return msg
+
     def _merge_bot_context(updates: dict):
         """Fusiona updates en jwb_bot_context del canal sin sobrescribir otras claves."""
         if not ch_id:
@@ -1619,6 +1690,31 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                             if tmpl_ids:
                                 break
             if tmpl_ids:
+                # Ambigüedad de marca: el cliente no dio marca (_tmpl_filter is None,
+                # _get_marca_filter no detectó HP/Samsung/etc en el mensaje) y el match
+                # por número suelto cae en templates de MARCAS OEM distintas (ej: HP
+                # LaserJet 2015 vs Samsung ML-2015, mismo "2015" por coincidencia).
+                # Si el cliente ya dio la marca, _tmpl_filter ya viene acotado y esto
+                # nunca dispara.
+                if _tmpl_filter is None and len(tmpl_ids) > 1:
+                    try:
+                        _marca_check = odoo.read(
+                            "product.template", tmpl_ids, ["jpc_marca_oem_id"],
+                        )
+                        _marcas_presentes = {
+                            m["jpc_marca_oem_id"][1] for m in _marca_check
+                            if m.get("jpc_marca_oem_id")
+                        }
+                    except Exception as _e:
+                        logger.warning("_buscar_producto_core: error chequeando marca ambigua: %s", _e)
+                        _marcas_presentes = set()
+                    if len(_marcas_presentes) > 1:
+                        _marcas_txt = ", ".join(sorted(_marcas_presentes))
+                        logger.info(
+                            "_buscar_producto_core: '%s' ambiguo entre marcas %s (tmpl=%s)",
+                            ref, _marcas_txt, tmpl_ids,
+                        )
+                        return [], [], ref, f'ambigua_marca:{_marcas_txt}'
                 prods = _tmpl_to_prods(tmpl_ids)
 
         # Fase 3: fallback por atributos e impresoras (con aviso al cliente)
@@ -1768,6 +1864,15 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 )
             if busqueda_tipo.startswith('repuesto_no_encontrado'):
                 return _msg_repuesto_no_encontrado(busqueda_tipo, referencia)
+            if busqueda_tipo.startswith('ambigua_marca'):
+                _marcas = busqueda_tipo.split(':', 1)[1] if ':' in busqueda_tipo else ''
+                return (
+                    f"La referencia '{referencia}' coincide con productos de más de una "
+                    f"marca ({_marcas}) — es un número de modelo que distintos fabricantes "
+                    f"reutilizan. NO elijas ni cotices ninguno todavía. Pregúntale al "
+                    f"cliente cuál marca/impresora tiene (ej: '¿tu impresora es {_marcas}?') "
+                    f"y vuelve a llamar esta tool con la marca incluida en la referencia."
+                )
             return (
                 f"No encontre productos para '{referencia}'.\n"
                 f"Dile al cliente algo como: 'No encuentro esta referencia en nuestro "
@@ -1820,6 +1925,15 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 )
             if busqueda_tipo.startswith('repuesto_no_encontrado'):
                 return _msg_repuesto_no_encontrado(busqueda_tipo, referencia)
+            if busqueda_tipo.startswith('ambigua_marca'):
+                _marcas = busqueda_tipo.split(':', 1)[1] if ':' in busqueda_tipo else ''
+                return (
+                    f"La referencia '{referencia}' coincide con productos de más de una "
+                    f"marca ({_marcas}) — es un número de modelo que distintos fabricantes "
+                    f"reutilizan. NO elijas ni cotices ninguno todavía. Pregúntale al "
+                    f"cliente cuál marca/impresora tiene (ej: '¿tu impresora es {_marcas}?') "
+                    f"y vuelve a llamar esta tool con la marca incluida en la referencia."
+                )
             return (
                 f"No encontre productos para '{referencia}'.\n"
                 f"Dile al cliente algo como: 'No encuentro esta referencia en nuestro "
@@ -1995,6 +2109,10 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 f"❌ Cotización no encontrada o no pertenece al cliente actual. "                f"Llama crear_cotizacion() para crear una nueva."
             )
         orders = [order_rec]
+
+        _stock_error = _verificar_stock_o_sugerir(product_id, cantidad)
+        if _stock_error:
+            return _stock_error
 
         prods = odoo.read("product.product", [product_id], ["name", "jpc_pos_name", "default_code"])
         if not prods:
@@ -2982,10 +3100,15 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             order_name = orders[0]["name"] if orders else str(order_id)
 
             added = []
+            agotados = []
             for line in to_quote:
                 pid = line["product_id"][0] if isinstance(line["product_id"], list) else line["product_id"]
                 pname = line.get("product_name", "")
                 qty = line.get("qty_solicitada") or 1.0
+                _stock_error = _verificar_stock_o_sugerir(pid, qty)
+                if _stock_error:
+                    agotados.append(_stock_error)
+                    continue
                 sol_id = odoo.create("sale.order.line", {
                     "order_id": order_id,
                     "product_id": pid,
@@ -2999,6 +3122,9 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 )
                 added.append(f"  • {pname} × {qty:.0f} = {_fmt_currency(price_total)}")
 
+            if not added:
+                return "\n\n".join(agotados) if agotados else "No se pudo agregar ningún producto."
+
             odoo.execute_kw(
                 "jpc.whatsapp.bot.carrito", "write",
                 [[c["id"]], {"sale_order_id": order_id, "state": "quoted"}],
@@ -3008,6 +3134,9 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             result = [f"✅ {order_name} (ID:{order_id})"]
             result.extend(added)
             result.append(f"Total: {_fmt_currency(total)} (IVA incluido)")
+            if agotados:
+                result.append("")
+                result.extend(agotados)
             return "\n".join(result)
         except Exception as e:
             logger.exception("crear_cotizacion_desde_carrito: error")

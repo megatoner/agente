@@ -2381,7 +2381,13 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
     @tool
     def estado_de_cuenta(partner_id: int) -> str:
-        """Obtener el estado de cuenta del cliente: deuda total y facturas vencidas."""
+        """Obtener el estado de cuenta del cliente: deuda total, deuda vencida y el
+        detalle de facturas pendientes. Cada línea ya trae la marca "⚠️ VENCIDA"
+        cuando corresponde — es un cálculo exacto por fecha, NO la recalcules ni la
+        infieras tú (ej. asumiendo que solo la más antigua está vencida): repite
+        tal cual qué facturas están marcadas."""
+        from datetime import date as _date
+
         invs = odoo.search_read(
             "account.move",
             [("partner_id","child_of",_commercial_id(partner_id) or partner_id),("move_type","=","out_invoice"),
@@ -2389,12 +2395,31 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             ["name","invoice_date_due","amount_residual"], 20)
         if not invs:
             return "✅ El cliente no tiene facturas pendientes."
+
+        invs.sort(key=lambda i: i.get("invoice_date_due") or "")
+        hoy = _date.today()
         total = sum(i.get("amount_residual",0) for i in invs)
-        lines = [f"💳 Deuda total: {_fmt_currency(total)}\n"]
+        total_vencido = 0.0
+        detalle = []
         for inv in invs:
-            lines.append(f"  • {inv.get('name')} | Vence:{_fmt_date(str(inv.get('invoice_date_due','') or ''))} | "
-                         f"{_fmt_currency(inv.get('amount_residual',0))}")
-        return "\n".join(lines)
+            due_str = str(inv.get("invoice_date_due","") or "")
+            vencida = False
+            if due_str:
+                try:
+                    vencida = _date.fromisoformat(due_str[:10]) < hoy
+                except ValueError:
+                    pass
+            if vencida:
+                total_vencido += inv.get("amount_residual",0)
+            marca = " ⚠️ VENCIDA" if vencida else ""
+            detalle.append(f"  • {inv.get('name')} | Vence:{_fmt_date(due_str)} | "
+                            f"{_fmt_currency(inv.get('amount_residual',0))}{marca}")
+
+        header = [f"💳 Deuda total: {_fmt_currency(total)}"]
+        if total_vencido:
+            header.append(f"⚠️ Deuda vencida: {_fmt_currency(total_vencido)}")
+        header.append("")
+        return "\n".join(header + detalle)
 
     @tool
     def generar_link_pago(invoice_id: int) -> str:
@@ -2918,7 +2943,12 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
     @tool
     def enviar_estado_cuenta_whatsapp(partner_id: int) -> str:
-        """Generar el texto del estado de cuenta para enviar por WhatsApp."""
+        """Generar el texto del estado de cuenta para enviar por WhatsApp. Cada línea
+        ya trae la marca "⚠️ VENCIDA" cuando corresponde — es un cálculo exacto por
+        fecha, NO la recalcules ni la infieras tú (ej. asumiendo que solo la más
+        antigua está vencida): repite tal cual el texto que devuelve esta tool."""
+        from datetime import date as _date
+
         invs = odoo.search_read(
             "account.move",
             [("partner_id","child_of",_commercial_id(partner_id) or partner_id),("move_type","=","out_invoice"),
@@ -2926,15 +2956,35 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             ["name","invoice_date_due","amount_residual"], 10)
         if not invs:
             return "✅ El cliente no tiene saldo pendiente."
+
+        invs.sort(key=lambda i: i.get("invoice_date_due") or "")
+        hoy = _date.today()
         total = sum(i.get("amount_residual",0) for i in invs)
+        total_vencido = 0.0
         recs = odoo.read("res.partner", [partner_id], ["name"])
         pname = recs[0]["name"] if recs else "Cliente"
-        lines = [f"📊 *Estado de cuenta — {pname}*",
-                 f"Saldo total: *{_fmt_currency(total)}*\n"]
+
+        detalle = []
         for inv in invs:
-            lines.append(f"  • {inv.get('name')} | Vence:{_fmt_date(str(inv.get('invoice_date_due','') or ''))} | "
-                         f"{_fmt_currency(inv.get('amount_residual',0))}")
-        return "\n".join(lines)
+            due_str = str(inv.get("invoice_date_due","") or "")
+            vencida = False
+            if due_str:
+                try:
+                    vencida = _date.fromisoformat(due_str[:10]) < hoy
+                except ValueError:
+                    pass
+            if vencida:
+                total_vencido += inv.get("amount_residual",0)
+            marca = " ⚠️ VENCIDA" if vencida else ""
+            detalle.append(f"  • {inv.get('name')} | Vence:{_fmt_date(due_str)} | "
+                            f"{_fmt_currency(inv.get('amount_residual',0))}{marca}")
+
+        lines = [f"📊 *Estado de cuenta — {pname}*",
+                 f"Saldo total: *{_fmt_currency(total)}*"]
+        if total_vencido:
+            lines.append(f"⚠️ Saldo vencido: *{_fmt_currency(total_vencido)}*")
+        lines.append("")
+        return "\n".join(lines + detalle)
 
     @tool
     def crear_acuerdo_pago(partner_id: int, plan_descripcion: str) -> str:

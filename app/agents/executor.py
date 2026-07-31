@@ -565,6 +565,31 @@ def run_agent(
 
         dynamic_context += _cart_block
 
+    # Inyectar cotización que un asesor humano armó a mano en Odoo (sale.order
+    # en 'sent', fuera del carrito del bot — ver jwb_agent_bridge.py). Sin esto
+    # el agente no tiene forma de saber que existe y termina buscando el
+    # último pedido CONFIRMADO (viejo) cuando el cliente pregunta por "su
+    # pedido" (caso real: CAJASPRINT SA, 2026-07-30).
+    _human_quote = ctx.get("cotizacion_asesor") or {}
+    _hq_order_id = _human_quote.get("order_id")
+    if _hq_order_id:
+        _hq_block = f"\n\n[COTIZACIÓN ABIERTA — preparada por un asesor: {_human_quote.get('name', '')}]\n"
+        _hq_block += f"order_id={_hq_order_id} | Total: ${_human_quote.get('amount_total', 0):,.0f}\n"
+        for _l in _human_quote.get("lines") or []:
+            _hq_block += (
+                f"  • {_l.get('product_name', '')} × {_l.get('qty', 0):.0f} = "
+                f"${_l.get('price_subtotal', 0):,.0f}\n"
+            )
+        _hq_block += (
+            "IMPORTANTE: esta cotización la armó un asesor y sigue abierta (sin confirmar). "
+            "Si el cliente pregunta por 'su pedido', 'la cotización' o algo similar, "
+            "esta es la que corresponde — TIENE PRIORIDAD sobre buscar pedidos "
+            "confirmados antiguos con listar_pedidos_cliente/consultar_pedidos_cliente. "
+            f"Usa obtener_cotizacion(order_id={_hq_order_id}) si necesitas más detalle, "
+            "o generar_link_cotizacion/confirmar_orden si el cliente quiere proceder.\n"
+        )
+        dynamic_context += _hq_block
+
     # Inyectar mensajes recientes del canal (incluyendo respuestas de asesores humanos)
     _recent_msgs = ctx.get("recent_channel_messages") or []
     if _recent_msgs:

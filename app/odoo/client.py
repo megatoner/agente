@@ -111,12 +111,20 @@ class OdooClient:
         fields: List[str] = None,
         limit: int = 80,
         context: Dict[str, Any] = None,
+        order: str = None,
     ) -> List[Dict]:
+        """`order` es el ORDER BY de Odoo (ej. "date_order desc").
+
+        Sin él, un search_read con `limit` devuelve registros en orden
+        arbitrario: pedir "el último pedido" con limit=1 traía cualquiera.
+        """
         kwargs = {"limit": limit}
         if fields:
             kwargs["fields"] = fields
         if context:
             kwargs["context"] = context
+        if order:
+            kwargs["order"] = order
         return self.execute_kw(model, "search_read", [domain or []], kwargs)
 
     def create(self, model: str, values: Dict[str, Any]) -> int:

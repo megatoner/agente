@@ -2676,8 +2676,33 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         ids = {p["carrier_id"][0] for p in picks if p.get("carrier_id")}
         if not ids:
             return {}
-        carriers = odoo.read("delivery.carrier", list(ids), ["name", "delivery_type"])
-        return {c["id"]: {"name": c.get("name") or "", "in_store": c.get("delivery_type") == "in_store"} for c in carriers}
+        carriers = odoo.read("delivery.carrier", list(ids), ["name", "delivery_type", "tracking_url"])
+        return {
+            c["id"]: {
+                "name": c.get("name") or "",
+                "in_store": c.get("delivery_type") == "in_store",
+                "tracking_url": (c.get("tracking_url") or "").strip(),
+            }
+            for c in carriers
+        }
+
+    def _tracking_link(url: str, guia: str) -> str:
+        """URL de rastreo lista para darle al cliente, o '' si no se puede armar.
+
+        Muchas transportadoras se configuran con la URL a secas ('www.x.com/rastreo')
+        sin protocolo — WhatsApp no la vuelve enlace y el cliente no puede tocarla.
+        Si la URL trae un marcador de la guía se sustituye; si no, se entrega la
+        página de rastreo y la guía por aparte.
+        """
+        url = (url or "").strip()
+        if not url:
+            return ""
+        if not url.lower().startswith(("http://", "https://")):
+            url = "https://" + url.lstrip("/")
+        for marcador in ("{tracking}", "{guia}", "{ref}", "%s"):
+            if marcador in url:
+                return url.replace(marcador, (guia or "").strip())
+        return url
 
     def _fmt_estado_envio(pick, carriers):
         """(icono, estado, fecha, lineas_extra) para un stock.picking.
@@ -2710,13 +2735,172 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         extra = []
         if not es_recoge_tienda and info.get("name"):
             extra.append(f"Transportista: {info['name']}")
-        if pick.get("carrier_tracking_ref"):
-            extra.append(f"Guía: {pick['carrier_tracking_ref']}")
+        # Con guía de rastreo el envío NO va con nuestros mensajeros sino con una
+        # transportadora externa: el cliente rastrea en el sitio de ella, y no hay
+        # ETA de ruta ni firma nuestra que ofrecerle.
+        guia = (pick.get("carrier_tracking_ref") or "").strip()
+        if guia:
+            extra.append(f"📦 Envío con transportadora externa | Guía de rastreo: {guia}")
+            link = _tracking_link(info.get("tracking_url", ""), guia)
+            if link:
+                extra.append(f"    Link de rastreo: {link}")
+                extra.append(
+                    "    Dale al cliente la guía Y el link, textualmente. "
+                    "Si el link no lleva la guía incrustada, aclárale que debe "
+                    "ingresarla en esa página."
+                )
+            else:
+                extra.append(
+                    f"    No hay link de rastreo configurado para {info.get('name') or 'esta transportadora'}. "
+                    "Dale la guía y el nombre de la transportadora para que rastree en el sitio de ella. "
+                    "NO inventes una URL."
+                )
         return icon, estado, fecha, extra
+
+    # ── Módulo de ruta (jpc_ruta): hora real, novedad y firma ────────────────
+    # Ventanas horarias por jornada. Salen de 983 entregas reales de 60 días
+    # (percentiles 10-90 de la hora de finalización). NO usar eta_plan para
+    # prometerle una hora al cliente: sobre 878 entregas, la mediana llega 73
+    # min después del plan y solo 1 de cada 3 cae dentro de la hora siguiente.
+    _VENTANA_JORNADA = {
+        "manana": "entre las 9:00 a. m. y la 1:00 p. m.",
+        "tarde": "entre las 12:00 m. y las 5:00 p. m.",
+    }
+    _NOVEDAD_LABEL = {
+        "cerrado": "el local estaba cerrado",
+        "no_recibieron": "no quisieron recibir el pedido",
+        "direccion_errada": "la dirección estaba errada",
+        "cliente_ausente": "el cliente no se encontraba",
+        "sin_dinero": "no tenían el dinero para el pago contra entrega",
+        "otro": "hubo una novedad",
+    }
+    _RUTA_FIELDS = [
+        "picking_id", "ruta_id", "sequence", "is_delivered", "estado_parada",
+        "novedad", "comentarios", "fecha_hora_finalizacion", "parent_jornada",
+        "parent_date", "parent_state",
+    ]
+
+    def _hora_local(dt_utc: str) -> str:
+        """'2026-07-31 20:36:14' (UTC) -> '3:36 p. m.' (Bogotá, UTC-5 fijo).
+
+        Colombia no tiene horario de verano, así que el offset es constante.
+        Se calcula aquí en vez de leer el campo *_display del modelo porque
+        ese compute depende del timezone del usuario RPC (bot_agent), que no
+        necesariamente es America/Bogota.
+        """
+        import datetime as _d
+        try:
+            dt = _d.datetime.strptime(str(dt_utc)[:19], "%Y-%m-%d %H:%M:%S") - _d.timedelta(hours=5)
+            h = dt.hour % 12 or 12
+            return f"{h}:{dt.minute:02d} {'a. m.' if dt.hour < 12 else 'p. m.'}"
+        except Exception:
+            return ""
+
+    def _ruta_info(picking_ids: list) -> dict:
+        """picking_id -> dict con estado de la parada en la ruta. {} si no aplica."""
+        if not picking_ids:
+            return {}
+        try:
+            lineas = odoo.search_read(
+                "jpc.ruta.line",
+                [("picking_id", "in", list(picking_ids))],
+                _RUTA_FIELDS, limit=200, order="id desc",
+            ) or []
+        except Exception as e:
+            logger.warning("_ruta_info: %s", e)
+            return {}
+        # Contar paradas por ruta para el "parada X de Y"
+        ruta_ids = {l["ruta_id"][0] for l in lineas if l.get("ruta_id")}
+        totales = {}
+        for rid in ruta_ids:
+            try:
+                totales[rid] = odoo.execute_kw(
+                    "jpc.ruta.line", "search_count", [[("ruta_id", "=", rid)]],
+                )
+            except Exception:
+                pass
+        # ¿Cuáles de esas paradas tienen firma REAL capturada? El Binary es
+        # attachment=True, así que el archivo vive en ir.attachment. Hay que
+        # comprobarlo: no todas las entregas quedan firmadas, y anunciarle al
+        # modelo una firma inexistente lo lleva a prometérsela al cliente.
+        con_firma = set()
+        if lineas:
+            try:
+                atts = odoo.search_read(
+                    "ir.attachment",
+                    [("res_model", "=", "jpc.ruta.line"),
+                     ("res_field", "=", "firma_cliente"),
+                     ("res_id", "in", [l["id"] for l in lineas])],
+                    ["res_id"], limit=200,
+                ) or []
+                con_firma = {a["res_id"] for a in atts}
+            except Exception as e:
+                logger.warning("_ruta_info firmas: %s", e)
+
+        out = {}
+        for l in lineas:
+            pid = l["picking_id"][0] if l.get("picking_id") else None
+            if not pid or pid in out:      # order=id desc -> nos quedamos con la más reciente
+                continue
+            rid = l["ruta_id"][0] if l.get("ruta_id") else None
+            out[pid] = {
+                "linea_id": l["id"],
+                "tiene_firma": l["id"] in con_firma,
+                "entregado": bool(l.get("is_delivered")),
+                "estado": l.get("estado_parada") or "",
+                "novedad": l.get("novedad") or "",
+                "comentarios": (l.get("comentarios") or "").strip(),
+                "hora_real": _hora_local(l.get("fecha_hora_finalizacion") or ""),
+                "jornada": l.get("parent_jornada") or "",
+                "fecha_ruta": l.get("parent_date") or "",
+                "secuencia": l.get("sequence") or 0,
+                "total_paradas": totales.get(rid, 0),
+            }
+        return out
+
+    def _linea_ruta_texto(info: dict) -> list:
+        """Líneas de texto para el agente a partir de la info de ruta."""
+        if not info:
+            return []
+        out = []
+        if info["entregado"]:
+            if info["hora_real"]:
+                out.append(f"🕒 Entregado a las {info['hora_real']} (dato real de la ruta)")
+            if info["tiene_firma"]:
+                out.append(
+                    "📝 Hay firma de recibido: usa enviar_firma_entrega(picking_id=...) "
+                    "SOLO si el cliente la pide o dice que no recibió el pedido."
+                )
+            else:
+                out.append(
+                    "📝 SIN firma digital de esta entrega — no le ofrezcas ni le prometas "
+                    "una prueba de entrega firmada."
+                )
+        elif info["estado"] == "fallida" or info["novedad"]:
+            motivo = _NOVEDAD_LABEL.get(info["novedad"], "hubo una novedad")
+            out.append(f"⚠️ Entrega NO completada: {motivo}")
+            if info["comentarios"]:
+                out.append(f"    Nota del mensajero: {info['comentarios'][:200]}")
+        else:
+            pos = ""
+            if info["secuencia"] and info["total_paradas"]:
+                pos = f" (parada {info['secuencia']} de {info['total_paradas']})"
+            ventana = _VENTANA_JORNADA.get(info["jornada"], "")
+            if ventana:
+                out.append(f"🚚 En ruta hoy{pos} — llega aproximadamente {ventana}")
+            else:
+                out.append(f"🚚 En ruta{pos}")
+            out.append(
+                "    IMPORTANTE: esa franja es un ESTIMADO de la ruta, no una hora exacta. "
+                "Dísela como aproximada; NUNCA prometas una hora puntual."
+            )
+        return out
 
     @tool
     def estado_entrega(order_id: int) -> str:
-        """Consultar el estado de entrega de un pedido. Muestra estado del pedido Y de cada envío por separado (transportista y guía de rastreo si aplica)."""
+        """Consultar el estado de entrega de un pedido: estado del pedido, de cada envío,
+        y si está en ruta la posición y franja horaria aproximada. Si ya se entregó informa
+        la hora real y si quedó firma de recibido."""
         recs = odoo.read("sale.order", [order_id], ["name","state","picking_ids"])
         if not recs:
             return f"Pedido {order_id} no encontrado."
@@ -2732,15 +2916,45 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             active_picks = [p for p in picks if p.get("state") != "cancel"]
             cancelled_picks = [p for p in picks if p.get("state") == "cancel"]
             carriers = _carrier_map(active_picks)
+            rutas = _ruta_info([p["id"] for p in active_picks])
             for pick in active_picks:
                 icon, estado, fecha, extra = _fmt_estado_envio(pick, carriers)
-                lines.append(f"  {icon} {pick.get('name')} | {estado} | {fecha}")
+                lines.append(
+                    f"  {icon} {pick.get('name')} (picking_id={pick['id']}) | {estado} | {fecha}"
+                )
                 for ex in extra:
                     lines.append(f"      {ex}")
+                # Datos del módulo de ruta (hora real, novedad, firma, posición).
+                # Solo aplican a envíos con mensajero propio: si hay guía de
+                # rastreo el paquete lo lleva una transportadora externa y no
+                # existe parada de ruta ni firma nuestra.
+                if not (pick.get("carrier_tracking_ref") or "").strip():
+                    for rl in _linea_ruta_texto(rutas.get(pick["id"])):
+                        lines.append(f"      {rl}")
             if not active_picks and cancelled_picks:
                 lines.append("  ⚠️ El despacho fue cancelado pero el pedido sigue activo — puede estar pendiente de reprogramación")
         return "\n".join(lines)
 
+
+    @tool
+    def enviar_firma_entrega(picking_id: int) -> str:
+        """Enviar al cliente por WhatsApp la firma que dio al recibir un despacho entregado.
+        El picking_id sale de estado_entrega. Usar SOLO si el cliente pide la prueba de
+        entrega o dice que no recibió el pedido. Si no hay firma capturada, díselo — no la
+        inventes.
+        """
+        if not ch_id:
+            return "Sin canal de WhatsApp activo — no se puede enviar la firma."
+        try:
+            return odoo.execute_kw(
+                "jpc.whatsapp.bot.funciones.negocio",
+                "action_enviar_firma_entrega_agente",
+                [[]],
+                {"picking_id": int(picking_id), "channel_id": ch_id},
+            )
+        except Exception as e:
+            logger.exception("enviar_firma_entrega picking=%s", picking_id)
+            return f"No se pudo enviar la firma: {str(e)[:200]}"
 
     @tool
     def consultar_pedidos_cliente(partner_id: int, limit: int = 5) -> str:

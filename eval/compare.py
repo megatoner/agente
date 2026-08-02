@@ -50,27 +50,46 @@ def costo(usage: Dict[str, Any], model: str) -> float:
 
 
 def load(path: str) -> Dict[str, Dict[str, Any]]:
-    out = {}
+    """Carga un brazo. Salta líneas corruptas en vez de reventar: un replay
+    interrumpido puede dejar una línea a medias y no vale la pena perder los
+    otros 59 escenarios por eso."""
+    out, corruptas = {}, 0
     with open(path, encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
             if not line:
                 continue
-            r = json.loads(line)
-            key = f"{r.get('session_id')}|{r.get('ts_original')}"
-            out[key] = r
+            try:
+                r = json.loads(line)
+            except Exception:
+                corruptas += 1
+                continue
+            out[r.get("session_id")] = r
+    if corruptas:
+        print(f"  (aviso: {corruptas} linea(s) corrupta(s) saltada(s) en {path})")
     return out
 
 
 def precios(texto: str) -> set:
-    return {p.replace(" ", "") for p in _PRECIO_RE.findall(texto or "")}
+    """Importes citados, normalizados a solo dígitos.
+
+    El modelo alterna separador de miles entre '.' y ',' de una corrida a
+    otra ($184.000 vs $184,000). Es el MISMO importe: comparar el texto
+    crudo generaba falsos positivos que enmascaraban las diferencias reales.
+    """
+    return {re.sub(r"\D", "", p) for p in _PRECIO_RE.findall(texto or "")}
 
 
 def main(argv: List[str]) -> int:
-    if len(argv) < 3:
+    args = [x for x in argv[1:] if not x.startswith("--")]
+    flags = {x for x in argv[1:] if x.startswith("--")}
+    # --control: los dos brazos son la MISMA configuración. Lo que se mide es
+    # el piso de ruido del modelo, no una regresión — el veredicto cambia.
+    es_control = "--control" in flags
+    if len(args) < 2:
         print(__doc__)
         return 1
-    a, b = load(argv[1]), load(argv[2])
+    a, b = load(args[0]), load(args[1])
     claves = [k for k in a if k in b]
     if not claves:
         print("Los dos brazos no comparten escenarios.")
@@ -135,7 +154,17 @@ def main(argv: List[str]) -> int:
             print(" ", line)
         if len(bloqueantes) > 60:
             print(f"  ... y {len(bloqueantes) - 60} más")
-        print("\nVEREDICTO: NO desplegar. Hay regresiones que revisar.")
+
+    if es_control:
+        print("\nPISO DE RUIDO (dos corridas de la MISMA configuración).")
+        print("Una variante solo es regresión si SUPERA estas tasas:")
+        print(f"  escalacion={n_esc / n * 100:.1f}%  vacia={n_vacio / n * 100:.1f}%  "
+              f"tools={n_tools_dif / n * 100:.1f}%  precios={n_precio / n * 100:.1f}%")
+        return 0
+
+    if bloqueantes:
+        print("\nVEREDICTO: revisar contra el piso de ruido del brazo de control "
+              "antes de concluir que es regresión.")
         return 2
 
     print("\nVEREDICTO: sin regresiones detectadas en las señales bloqueantes.")

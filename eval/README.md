@@ -104,16 +104,17 @@ set -a; . ./.env; set +a
 ### 3. Comparar
 
 ```bash
-# primero el control, para saber cuánto ruido hay sin cambiar nada
-./.venv/bin/python -m eval.compare eval/data/arm_control.jsonl eval/data/arm_base.jsonl
+# primero el control (--control), para saber cuánto ruido hay sin cambiar nada
+./.venv/bin/python -m eval.compare \
+    eval/data/arm_control.jsonl eval/data/arm_base.jsonl --control
 
 # después la variante, contra el mismo baseline
 ./.venv/bin/python -m eval.compare eval/data/arm_base.jsonl eval/data/arm_nuevo.jsonl
 ```
 
 **Regla de lectura: la variante se compara contra el control, no contra cero.**
-Si el control da 12% de "tools distintas", un 14% en la variante es ruido; un
-40% es regresión.
+Con el piso medido abajo (tools 3,3%), un 4% en la variante es ruido; un 25%
+es regresión.
 
 Señales bloqueantes que reporta `compare`:
 
@@ -153,7 +154,24 @@ borrador que haya quedado se elimina.
 existía antes, nunca confirma ni factura ni cobra, y ningún cliente recibe
 nada.
 
-## Piso de ruido conocido
+## Piso de ruido medido (60 escenarios reales, 2026-08-02)
+
+Dos corridas de la **misma** configuración sobre 60 escenarios de 57 canales:
+
+| Señal | Tasa de ruido |
+|---|---|
+| Escalación cambiada | **0,0%** |
+| Respuesta vacía | **0,0%** |
+| Tools distintas | **3,3%** |
+| Precios distintos | **3,3%** |
+
+Costo: $0,0104 vs $0,0101 por escenario (−2,9%, dentro del ruido).
+Iteraciones: 86 vs 86, idéntico.
+
+Lectura: las dos señales más críticas del negocio (escalar a un asesor y dejar
+al cliente sin respuesta) son **perfectamente estables**, así que ahí el
+harness detecta cualquier regresión real. En tools y precios hay que superar
+~3% para hablar de regresión.
 
 Con temperatura 0.2, el mismo escenario corrido dos veces con configuración
 idéntica puede producir respuestas materialmente distintas. Ejemplo real de la

@@ -31,10 +31,12 @@ from typing import Any, Dict, List
 
 sys.path.insert(0, "/opt/odoo-agents")
 
-from app.agents.executor import _get_anthropic_tools, _run_with_anthropic_client, _model_name
-from app.agents.providers import get_llm
-from app.odoo.tools import create_odoo_tools
-from eval.dryrun import DryRunGuard
+# El replay NO debe realimentar el archivo de captura: se apaga antes de
+# importar el executor, que lee la variable en cada run.
+os.environ.pop("JWB_EVAL_CAPTURE", None)
+
+from app.agents.executor import run_agent  # noqa: E402
+from eval.dryrun import DryRunGuard  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -69,31 +71,40 @@ def system_for(rec: Dict[str, Any], override_path: str, capture_path: str) -> st
         return fh.read()
 
 
+def _raw_message(rec: Dict[str, Any]) -> str:
+    """Mensaje crudo del cliente. Los registros viejos solo traen `messages`."""
+    if rec.get("message"):
+        return rec["message"]
+    for m in reversed(rec.get("messages") or []):
+        if m.get("role") == "user" and isinstance(m.get("content"), str):
+            return m["content"]
+    return ""
+
+
 def replay_one(rec: Dict[str, Any], system_prompt: str, model_override: str) -> Dict[str, Any]:
+    """Re-ejecuta un escenario pasando por `run_agent`, el mismo punto de
+    entrada de producción: así el contexto dinámico (cliente, carrito, FAQs,
+    historial) lo arma el código real y no una copia que puede desincronizarse.
+    """
     llm_model = model_override or rec.get("model") or ""
-    llm_obj = get_llm(llm_model)
-
-    ctx = rec.get("odoo_context") or {}
-    all_tools = create_odoo_tools(ctx)
-    wanted = set(rec.get("tool_names") or [])
-    tools = [t for t in all_tools if t.name in wanted] if wanted else all_tools
-    tools_by_name = {t.name: t for t in tools}
-    anthropic_tools = _get_anthropic_tools(tools)
-
-    messages = [{"role": "system", "content": system_prompt}] + list(rec.get("messages") or [])
+    agent_config = {
+        "model": llm_model,
+        "system_prompt": system_prompt,
+        "tools": rec.get("tool_names") or None,
+        "temperature": rec.get("temperature", 0.2),
+        "max_iterations": int(rec.get("max_iterations") or 8),
+        "max_tokens": int(rec.get("max_tokens") or 4096),
+        "memory_enabled": False,   # sin db; el historial va en odoo_context
+    }
 
     t0 = time.time()
     with DryRunGuard() as guard:
-        output, tools_used, iterations, usage = _run_with_anthropic_client(
-            llm_obj=llm_obj,
-            model_name=_model_name(llm_model),
-            messages=messages,
-            anthropic_tools=anthropic_tools,
-            tools_by_name=tools_by_name,
-            max_iterations=int(rec.get("max_iterations") or 8),
-            temperature=rec.get("temperature"),
+        res = run_agent(
+            message=_raw_message(rec),
             session_id=f"replay-{rec.get('session_id')}",
-            max_tokens=int(rec.get("max_tokens") or 4096),
+            db=None,
+            agent_config=agent_config,
+            odoo_context=rec.get("odoo_context") or {},
         )
     elapsed = time.time() - t0
 
@@ -101,12 +112,13 @@ def replay_one(rec: Dict[str, Any], system_prompt: str, model_override: str) -> 
         "session_id": rec.get("session_id"),
         "ts_original": rec.get("ts"),
         "model": llm_model,
-        "output": output,
-        "tools_used": tools_used,
-        "iterations": iterations,
-        "usage": usage,
+        "output": res.get("output", ""),
+        "tools_used": res.get("tools_used", []),
+        "iterations": res.get("iterations", 0),
+        "usage": res.get("usage", {}),
         "elapsed_s": round(elapsed, 2),
         "writes_blocked": guard.blocked,
+        "sandboxed": len(guard.sandboxed),
         "reads": guard.reads,
         "baseline": rec.get("baseline") or {},
     }

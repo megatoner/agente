@@ -45,6 +45,41 @@ queda un marcador) y esos escenarios se saltan en el replay.
 Juntar **al menos 50 escenarios** antes de sacar conclusiones. A ~450 runs/día
 eso es un par de horas.
 
+### 1-bis. …o reconstruirlos de conversaciones pasadas (más rápido)
+
+No hace falta esperar tráfico nuevo: `backfill.py` arma escenarios a partir de
+burbujas ya contestadas. Primero se extrae una muestra **estratificada** (máx.
+2 burbujas por canal, para no sobre-representar una sola conversación):
+
+```bash
+sudo -u postgres psql -d megatoner2026 -At -c "
+select json_agg(row_to_json(t)) from (
+  select id, channel_id, partner_id, bot_id, unified_text, create_date from (
+    select b.id, b.channel_id, b.partner_id, b.bot_id, b.unified_text,
+           to_char(b.create_date,'YYYY-MM-DD HH24:MI:SS') as create_date,
+           row_number() over (partition by b.channel_id order by b.id) as rn
+    from jpc_whatsapp_bot_burbuja b
+    where b.state='answered' and b.answered_via='bot'
+      and b.create_date > now() - interval '7 days'
+      and coalesce(b.unified_text,'') <> ''
+      and length(b.unified_text) between 8 and 600
+  ) s where s.rn <= 2
+  order by random()
+) t;" > eval/data/hist_raw.json
+
+./.venv/bin/python -m eval.backfill --limit 60
+```
+
+Qué se reconstruye fielmente: el mensaje del cliente, sus datos, la
+configuración del bot (pricelist / bodega / `price_fallback`), el historial del
+canal **filtrado a mensajes anteriores a esa burbuja**, y las FAQs con el mismo
+filtro de keywords del bridge.
+
+Qué **no** se reconstruye (no queda registro histórico): el estado del carrito,
+la cotización de asesor vigente entonces, y el resumen de sesión anterior. Para
+un A/B da igual — ambos brazos reciben el mismo contexto. Pero los flujos de
+carrito hay que cubrirlos con captura en vivo.
+
 ### 2. Replicar los brazos
 
 ```bash
@@ -145,3 +180,4 @@ es opcional.
 | `replay.py` | Re-ejecuta escenarios con config alterna |
 | `compare.py` | Diff de dos brazos + veredicto |
 | `smoke.py` | Prueba de humo: un run real por el camino completo |
+| `backfill.py` | Reconstruye escenarios de conversaciones ya ocurridas |

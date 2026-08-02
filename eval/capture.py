@@ -75,6 +75,7 @@ def record(
     result: Dict[str, Any],
     odoo_context: Optional[Dict[str, Any]] = None,
     max_tokens: int = 4096,
+    message: str = "",
 ) -> None:
     """Escribe un registro. Silencioso ante cualquier error."""
     if not enabled():
@@ -102,6 +103,12 @@ def record(
             "temperature": temperature,
             "max_iterations": max_iterations,
             "tool_names": sorted(tool_names),
+            # Mensaje CRUDO del cliente. El replay se lo pasa a run_agent, que
+            # reconstruye el contexto dinámico con el código de producción —
+            # así el mismo formato sirve para captura en vivo y para backfill
+            # histórico (ver eval/backfill.py).
+            "message": message,
+            # El array ya armado queda solo como referencia de lo que se envió.
             "messages": clean_msgs,
             "has_image": has_image,
             "max_tokens": max_tokens,

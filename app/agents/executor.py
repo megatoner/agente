@@ -766,6 +766,7 @@ def run_agent(
                 max_iterations=max_iterations,
                 odoo_context=odoo_context or {},
                 max_tokens=int(config.get("max_tokens") or 4096),
+                message=message,
                 result={
                     "output": output,
                     "tools_used": tools_used,

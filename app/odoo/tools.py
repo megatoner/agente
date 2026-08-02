@@ -2686,23 +2686,35 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             for c in carriers
         }
 
-    def _tracking_link(url: str, guia: str) -> str:
-        """URL de rastreo lista para darle al cliente, o '' si no se puede armar.
+    def _tracking_link(url: str, guia: str) -> tuple:
+        """(url_lista, lleva_guia) a partir del campo 'Enlace de seguimiento'
+        (delivery.carrier.tracking_url). ('', False) si no hay nada configurado.
 
-        Muchas transportadoras se configuran con la URL a secas ('www.x.com/rastreo')
-        sin protocolo — WhatsApp no la vuelve enlace y el cliente no puede tocarla.
-        Si la URL trae un marcador de la guía se sustituye; si no, se entrega la
-        página de rastreo y la guía por aparte.
+        Odoo documenta el placeholder `<shipmenttrackingnumber>` en ese campo
+        (delivery_carrier.py: "Use <shipmenttrackingnumber> as a placeholder in
+        your URL"). Se aceptan además otros marcadores comunes por si alguien
+        los configuró a mano.
+
+        Si la URL no trae placeholder, se entrega tal cual: es la página de
+        rastreo genérica y el cliente debe teclear la guía ahí. `lleva_guia`
+        distingue los dos casos para poder decírselo bien.
+
+        Muchas se cargan sin protocolo ('www.x.com/rastreo'); WhatsApp no las
+        vuelve enlace tocable, así que se les antepone https://.
         """
         url = (url or "").strip()
         if not url:
-            return ""
+            return "", False
+        guia = (guia or "").strip()
+        lleva = False
+        for marcador in ("<shipmenttrackingnumber>", "{tracking}", "{guia}", "{ref}", "%s"):
+            if marcador in url:
+                url = url.replace(marcador, guia)
+                lleva = True
+                break
         if not url.lower().startswith(("http://", "https://")):
             url = "https://" + url.lstrip("/")
-        for marcador in ("{tracking}", "{guia}", "{ref}", "%s"):
-            if marcador in url:
-                return url.replace(marcador, (guia or "").strip())
-        return url
+        return url, lleva
 
     def _fmt_estado_envio(pick, carriers):
         """(icono, estado, fecha, lineas_extra) para un stock.picking.
@@ -2741,13 +2753,18 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         guia = (pick.get("carrier_tracking_ref") or "").strip()
         if guia:
             extra.append(f"📦 Envío con transportadora externa | Guía de rastreo: {guia}")
-            link = _tracking_link(info.get("tracking_url", ""), guia)
-            if link:
-                extra.append(f"    Link de rastreo: {link}")
+            link, lleva_guia = _tracking_link(info.get("tracking_url", ""), guia)
+            if link and lleva_guia:
+                extra.append(f"    Link de rastreo directo: {link}")
                 extra.append(
-                    "    Dale al cliente la guía Y el link, textualmente. "
-                    "Si el link no lleva la guía incrustada, aclárale que debe "
-                    "ingresarla en esa página."
+                    "    Ese link ya lleva la guía incrustada: dáselo al cliente "
+                    "TEXTUALMENTE, tal cual, sin modificarlo ni acortarlo."
+                )
+            elif link:
+                extra.append(f"    Página de rastreo: {link}")
+                extra.append(
+                    "    Esa página NO lleva la guía incrustada: dale el link Y la "
+                    "guía, y aclárale que debe ingresar la guía ahí para ver el estado."
                 )
             else:
                 extra.append(

@@ -750,6 +750,32 @@ def run_agent(
         if output and output.strip():  # nunca guardar output vacío en memoria
             store_memory(db, session_id, output, meta_data={"role": "assistant"})
 
+    # Captura para el harness de evaluación (apagada salvo JWB_EVAL_CAPTURE).
+    # Envuelta en try/except: la telemetría nunca puede tumbar una conversación.
+    try:
+        from eval import capture as _eval_capture
+
+        if _eval_capture.enabled():
+            _eval_capture.record(
+                session_id=session_id,
+                model_name=llm_model,
+                system_content=system_prompt,
+                messages=[m for m in messages if m.get("role") != "system"],
+                tool_names=[t.name for t in tools],
+                temperature=temperature,
+                max_iterations=max_iterations,
+                odoo_context=odoo_context or {},
+                max_tokens=int(config.get("max_tokens") or 4096),
+                result={
+                    "output": output,
+                    "tools_used": tools_used,
+                    "iterations": iterations,
+                    "usage": usage,
+                },
+            )
+    except Exception:
+        logger.debug("eval capture: ignorado", exc_info=True)
+
     return {
         "output": output,
         "session_id": session_id,

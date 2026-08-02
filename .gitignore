@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 .env
 *.bak.*
+
+# Datos del harness de evaluacion: contienen datos de clientes
+eval/data/

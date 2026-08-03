@@ -323,14 +323,14 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             if codigo_base:
                 hermanos = odoo.search_read(
                     "product.template",
-                    [("jpc_pos_name", "ilike", codigo_base), ("id", "!=", tmpl_id), ("active", "=", True)],
+                    [("jpc_pos_name", "ilike", codigo_base), ("id", "!=", tmpl_id), ("active", "=", True), ("is_published", "=", True)],
                     ["id"], limit=10,
                 )
                 tmpl_ids = [h["id"] for h in hermanos]
                 if tmpl_ids:
                     variantes = odoo.search_read(
                         "product.product",
-                        [("product_tmpl_id", "in", tmpl_ids), ("active", "=", True)],
+                        [("product_tmpl_id", "in", tmpl_ids), ("active", "=", True), ("is_published", "=", True)],
                         ["id", "default_code", "display_name", "qty_available"],
                         limit=10,
                         **({"context": _wh_ctx} if _warehouse_id else {}),
@@ -1011,7 +1011,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             pub_tmpls = odoo.search_read(
                 "product.template",
                 [("id", "in", list({p["product_tmpl_id"][0] for p in ptavs if p.get("product_tmpl_id")})),
-                 ("active", "=", True)],
+                 ("active", "=", True), ("is_published", "=", True)],
                 ["id"], 20,
             )
             tmpl_ids = [t["id"] for t in pub_tmpls]
@@ -1055,7 +1055,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             pub_tmpls = odoo.search_read(
                 "product.template",
                 [("id", "in", list({p["product_tmpl_id"][0] for p in ptavs if p.get("product_tmpl_id")})),
-                 ("active", "=", True)],
+                 ("active", "=", True), ("is_published", "=", True)],
                 ["id"], 20,
             )
             tmpl_ids = [t["id"] for t in pub_tmpls]
@@ -1344,7 +1344,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             dom = ['|', ('categ_id.complete_name', 'ilike', 'repuesto')] + dom
         try:
             cands = odoo.search_read(
-                'product.template', [('active', '=', True)] + dom,
+                'product.template', [('active', '=', True), ('is_published', '=', True)] + dom,
                 ['id', 'name'], limit=80,
             )
         except Exception as e:
@@ -1418,7 +1418,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             # qty_available en domain no respeta warehouse context en Odoo 19 — filtrar en Python.
             all_variants = odoo.search_read(
                 "product.product",
-                [("product_tmpl_id", "in", tmpl_ids), ("active", "=", True)],
+                [("product_tmpl_id", "in", tmpl_ids), ("active", "=", True), ("is_published", "=", True)],
                 ["id", "default_code", "qty_available", "product_tmpl_id", "display_name"],
                 limit=30,
                 context=_wh_ctx if _warehouse_id else None,
@@ -1499,14 +1499,14 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             if not term_recs:
                 return []
             term_ids = [t["id"] for t in term_recs]
-            domain = [("jpc_search_exact_ids", "in", term_ids), ("active", "=", True)]
+            domain = [("jpc_search_exact_ids", "in", term_ids), ("active", "=", True), ("is_published", "=", True)]
             if tmpl_filter is not None:
                 domain.append(("id", "in", tmpl_filter))
             recs = odoo.search_read("product.template", domain, ["id"], limit=10)
             return [r["id"] for r in recs]
 
         def _similar(term, tmpl_filter=None):
-            domain = [("jpc_search_similar_ids.name", "ilike", term), ("active", "=", True)]
+            domain = [("jpc_search_similar_ids.name", "ilike", term), ("active", "=", True), ("is_published", "=", True)]
             if tmpl_filter is not None:
                 domain.append(("id", "in", tmpl_filter))
             recs = odoo.search_read("product.template", domain, ["id"], limit=10)
@@ -1527,7 +1527,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             matching_ids = [r["id"] for r in term_recs if boundary.search(r["name"])]
             if not matching_ids:
                 return []
-            domain = [("jpc_search_similar_ids", "in", matching_ids), ("active", "=", True)]
+            domain = [("jpc_search_similar_ids", "in", matching_ids), ("active", "=", True), ("is_published", "=", True)]
             if tmpl_filter is not None:
                 domain.append(("id", "in", tmpl_filter))
             recs = odoo.search_read("product.template", domain, ["id"], limit=10)
@@ -1601,7 +1601,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 # filtro y eran invisibles en toda búsqueda que mencionara "hp"
                 tmpls = odoo.search_read(
                     "product.template",
-                    [("jpc_marca_oem_id", "=", brand_id), ("active", "=", True)],
+                    [("jpc_marca_oem_id", "=", brand_id), ("active", "=", True), ("is_published", "=", True)],
                     ["id"], limit=5000,
                 )
             except Exception:
@@ -4043,7 +4043,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                     term_ids = [t["id"] for t in term_recs]
                     tmpl_recs = odoo.search_read(
                         "product.template",
-                        [("jpc_search_exact_ids", "in", term_ids), ("active", "=", True)],
+                        [("jpc_search_exact_ids", "in", term_ids), ("active", "=", True), ("is_published", "=", True)],
                         ["id"], limit=5,
                     )
                     tmpl_ids = [r["id"] for r in tmpl_recs]
@@ -4063,7 +4063,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
                 sim_recs = odoo.search_read(
                     "product.template",
-                    [("jpc_search_similar_ids.name", "ilike", ref), ("active", "=", True)],
+                    [("jpc_search_similar_ids.name", "ilike", ref), ("active", "=", True), ("is_published", "=", True)],
                     ["id"], limit=5,
                 )
                 tmpl_ids = [r["id"] for r in sim_recs]
@@ -4085,7 +4085,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                     if matching_ids:
                         tmpl_recs3 = odoo.search_read(
                             "product.template",
-                            [("jpc_search_similar_ids", "in", matching_ids), ("active", "=", True)],
+                            [("jpc_search_similar_ids", "in", matching_ids), ("active", "=", True), ("is_published", "=", True)],
                             ["id"], limit=5,
                         )
                         tmpl_ids = [r["id"] for r in tmpl_recs3]
@@ -4100,7 +4100,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             # Resolver product.product desde templates
             prods = odoo.search_read(
                 "product.product",
-                [("product_tmpl_id", "in", tmpl_ids), ("active", "=", True)],
+                [("product_tmpl_id", "in", tmpl_ids), ("active", "=", True), ("is_published", "=", True)],
                 ["id", "default_code", "qty_available", "product_tmpl_id"],
                 limit=10,
                 context=_wh_ctx if _warehouse_id else None,

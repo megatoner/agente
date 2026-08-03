@@ -2135,7 +2135,12 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         order_id, order_rec = _resolver_order_id_cliente(order_id, estados=("draft", "sent"))
         if not order_id:
             return (
-                f"❌ Cotización no encontrada o no pertenece al cliente actual. "                f"Llama crear_cotizacion() para crear una nueva."
+                f"❌ Cotización no encontrada o no pertenece al cliente actual — "
+                f"NO se agregó la línea. Verifica el ORDER_ID (usa el numérico de "
+                f"crear_cotizacion/agregar_linea_cotizacion, no los dígitos del nombre "
+                f"ni un código de referencia de producto); si el cliente ya tiene una "
+                f"cotización abierta, usa listar_pedidos_cliente para encontrar su ORDER_ID "
+                f"real — NO llames crear_cotizacion de nuevo, crearías una duplicada."
             )
         orders = [order_rec]
 
@@ -2978,7 +2983,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         """Consultar pedidos recientes del cliente con estado de pedido y estado de envío por separado (transportista y guía de rastreo si aplica)."""
         orders = odoo.search_read(
             "sale.order",
-            [("partner_id", "=", partner_id), ("state", "in", ["sale", "done"])],
+            [("partner_id", "child_of", _commercial_id(partner_id) or partner_id), ("state", "in", ["sale", "done"])],
             ["name", "date_order", "amount_total", "state", "picking_ids"],
             limit,
         )
@@ -3614,7 +3619,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             from datetime import datetime, timezone, timedelta
             orders = odoo.search_read(
                 "sale.order",
-                [("partner_id", "=", partner_id), ("state", "in", ["sale", "done"])],
+                [("partner_id", "child_of", _commercial_id(partner_id) or partner_id), ("state", "in", ["sale", "done"])],
                 ["name", "state", "delivery_status", "jpc_entrega_label", "date_order"],
                 limit=1,
                 order="date_order desc",
@@ -3908,7 +3913,11 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         exacto → similar → dígitos, y registra lo encontrado en el carrito.
         Para consulta de precio/información usa buscar_producto (envía tarjetas).
 
-        Retorna PRODUCT_ID, nombre, cantidad y nivel de confianza por cada referencia.
+        Retorna PRODUCT_ID, nombre, cantidad y nivel de confianza por cada referencia:
+        ✅ = coincidencia exacta (usa ese producto directamente, NO le preguntes al
+        cliente si quiere esa variante u otra similar — la referencia que mandó ya
+        identifica cuál es sin ambigüedad, p.ej. "CF280X" es el 80X, no el 80A).
+        ⚠️ similar / ⚠️ aprox. = SÍ hay ambigüedad real, ahí confirma con el cliente.
         """
         import re as _re
 

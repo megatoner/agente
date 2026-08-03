@@ -810,12 +810,22 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             d = direcciones[0]
             lineas.append(
                 f"Dirección de envío (1 sola, confirmar con el cliente si es esta): "
-                f"{d['etiqueta']} — {d['calle']}, {d['ciudad']}"
+                f"ID:{d['id']} | {d['etiqueta']} — {d['calle']}, {d['ciudad']}"
+            )
+            lineas.append(
+                "Cuando el cliente confirme, llama "
+                f"seleccionar_direccion_envio(order_id, {d['id']}) para fijarla en el pedido "
+                "— si no la fijas, el pedido puede quedar con OTRA dirección de la empresa."
             )
         else:
             lineas.append(f"Direcciones de envío guardadas ({len(direcciones)}, preguntar cuál usar):")
             for d in direcciones:
                 lineas.append(f"  - ID:{d['id']} | {d['etiqueta']} — {d['calle']}, {d['ciudad']}")
+            lineas.append(
+                "Cuando el cliente elija una, llama seleccionar_direccion_envio(order_id, direccion_id) "
+                "con el ID elegido para fijarla en el pedido — si no la fijas, el pedido puede quedar "
+                "con OTRA dirección de la empresa, distinta de la que confirmó el cliente."
+            )
         return "\n".join(lineas)
 
     def _estado_datos_facturacion():
@@ -952,6 +962,28 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         if not partes:
             partes.append("Datos de contacto (correo/teléfono) actualizados.")
         return "\n".join(partes)
+
+    @tool
+    def seleccionar_direccion_envio(order_id: int, direccion_id: int) -> str:
+        """Fija la dirección de envío del pedido a una de las direcciones EXISTENTES
+        devueltas por consultar_datos_facturacion (usa el ID de esa lista, NUNCA
+        inventes uno). Llamar SIEMPRE que el cliente confirme o elija una dirección
+        de envío — sin esto el pedido puede quedar con otra dirección de la empresa,
+        distinta de la que el cliente confirmó."""
+        if not ch_id:
+            return "Sin canal activo, no se puede aplicar la dirección."
+        try:
+            res = odoo.execute_kw(
+                "discuss.channel", "jwb_seleccionar_direccion_envio",
+                [[ch_id], order_id, direccion_id],
+            )
+        except Exception as e:
+            logger.warning("seleccionar_direccion_envio: %s", e)
+            return "No se pudo fijar la dirección de envío en el pedido."
+        if not res or not res.get("ok"):
+            return (res or {}).get("error") or "No se pudo fijar la dirección de envío."
+        d = res["direccion"]
+        return f"✅ Dirección de envío fijada: {d['etiqueta']} — {d['calle']}, {d['ciudad']}"
 
     # ── PRODUCTOS ─────────────────────────────────────────────────────────
 
@@ -4209,7 +4241,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
     return [
         obtener_cliente_whatsapp, buscar_cliente, registrar_cliente, obtener_perfil_cliente,
-        consultar_datos_facturacion, completar_datos_facturacion,
+        consultar_datos_facturacion, completar_datos_facturacion, seleccionar_direccion_envio,
         obtener_precio, buscar_producto, buscar_producto_cotizacion,
         crear_cotizacion, agregar_linea_cotizacion, obtener_cotizacion, registrar_espera_respuesta,
         confirmar_orden, enviar_cotizacion_whatsapp,

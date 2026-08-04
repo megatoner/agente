@@ -145,22 +145,41 @@ def _detectar_repuesto(texto):
     return None
 
 
-def _msg_repuesto_no_encontrado(busqueda_tipo, referencia):
+def _msg_repuesto_no_encontrado(busqueda_tipo, referencia, instruccion_fn=None):
     """Mensaje guia para el LLM cuando un repuesto pedido no esta en catalogo.
 
     busqueda_tipo viene empaquetado: 'repuesto_no_encontrado:<tipo>[:<parciales>]'.
+    instruccion_fn: _instruccion_producto_no_disponible del bot actual (closure
+    de create_odoo_tools) — construye el punto 2 a partir de la config del bot
+    en vez de un texto fijo. Si no se pasa (compatibilidad), usa el texto de
+    siempre.
     """
     partes = busqueda_tipo.split(':', 2)
     tipo = partes[1] if len(partes) > 1 else 'repuesto'
     parciales = partes[2] if len(partes) > 2 else ''
     nombre = _NOMBRES_REPUESTO.get(tipo, tipo)
+    if instruccion_fn:
+        punto_2 = "2. " + instruccion_fn(
+            'repuesto_no_encontrado', referencia,
+            default_mensaje=(
+                f"Ese repuesto ({nombre}) no está en nuestro catálogo en línea por el "
+                f"momento. Voy a pasar tu conversación a un asesor para que verifique "
+                f"disponibilidad y precio. 🙏"
+            ),
+            default_escalar=True,
+            motivo_escalar=f"Repuesto no encontrado ({nombre}): {referencia}",
+        )
+    else:
+        punto_2 = (
+            "2. Informa al cliente que ese repuesto no esta en el catalogo en linea y que un asesor "
+            "verificara disponibilidad y precio. Luego usa escalar_a_asesor con el motivo."
+        )
     lines = [
         f"⚠️ El cliente pidio un REPUESTO ({nombre}): '{referencia}'.",
         f"NO hay {nombre} en el catalogo para esa referencia.",
         "REGLAS OBLIGATORIAS:",
         f"1. NO ofrezcas toners, cartuchos ni tintas de esa referencia como si fueran el {nombre} pedido.",
-        "2. Informa al cliente que ese repuesto no esta en el catalogo en linea y que un asesor "
-        "verificara disponibilidad y precio. Luego usa escalar_a_asesor con el motivo.",
+        punto_2,
         "3. Si en el mismo mensaje el cliente pidio ADEMAS cartuchos/toners/tintas, "
         "busca cada uno con una llamada separada.",
     ]
@@ -220,6 +239,49 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             pass
         _commercial_cache[base] = cid
         return cid
+
+    _respuesta_producto_cache = {}
+
+    def _obtener_respuesta_producto(categoria, referencia="", default_mensaje="", default_escalar=True):
+        """Config por bot (jpc.whatsapp.bot.producto.respuesta) de mensaje +
+        escalar para una categoría de "producto no disponible". Si el bot no
+        tiene esa categoría configurada, cae al default hardcodeado (mismo
+        comportamiento de siempre) — así activar la tabla no rompe bots sin
+        configurar. {referencia} en el mensaje se reemplaza por el texto real.
+        """
+        cache_key = (_bot_id, categoria)
+        if cache_key in _respuesta_producto_cache:
+            mensaje, escalar = _respuesta_producto_cache[cache_key]
+        else:
+            mensaje, escalar = default_mensaje, default_escalar
+            if _bot_id:
+                try:
+                    res = odoo.execute_kw(
+                        "jpc.whatsapp.bot.config", "jwb_obtener_respuesta_producto",
+                        [[_bot_id], categoria],
+                    )
+                    if res and res.get("ok"):
+                        mensaje = res.get("mensaje") or default_mensaje
+                        escalar = bool(res.get("escalar_a_asesor"))
+                except Exception as e:
+                    logger.warning("_obtener_respuesta_producto categoria=%s: %s", categoria, e)
+            _respuesta_producto_cache[cache_key] = (mensaje, escalar)
+        return (mensaje or "").replace("{referencia}", referencia or ""), escalar
+
+    def _instruccion_producto_no_disponible(categoria, referencia, default_mensaje,
+                                             default_escalar=True, motivo_escalar=None):
+        """Arma la instrucción completa para el LLM (mensaje + qué hacer con
+        escalar_a_asesor) a partir de la config de _obtener_respuesta_producto."""
+        mensaje, escalar = _obtener_respuesta_producto(
+            categoria, referencia, default_mensaje, default_escalar,
+        )
+        partes = [f"Dile al cliente algo como: '{mensaje}'"]
+        if escalar:
+            motivo = motivo_escalar or f"{categoria}: {referencia}"
+            partes.append(f"Luego usa escalar_a_asesor con motivo '{motivo}'.")
+        else:
+            partes.append("NO escales por esto — ya quedó resuelto informando al cliente.")
+        return "\n".join(partes)
 
     def _es_del_cliente(order_partner):
         """True si order_partner (m2o de sale.order.partner_id) es el cliente actual,
@@ -343,12 +405,36 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                                     f"stock: {v.get('qty_available'):.0f}\n")
                         msg += "Ofrécele estas opciones al cliente en vez de la agotada."
                     else:
-                        msg += "No hay variantes alternativas con stock. Ofrece escalar a asesor."
+                        msg += _instruccion_producto_no_disponible(
+                            'agotado_cotizacion', nombre,
+                            default_mensaje=(
+                                "No tengo suficiente stock de ese producto para la "
+                                "cantidad que necesitas en este momento."
+                            ),
+                            default_escalar=False,
+                            motivo_escalar=f"Producto agotado sin alternativas: {nombre}",
+                        )
                 else:
-                    msg += "No hay variantes alternativas con stock. Ofrece escalar a asesor."
+                    msg += _instruccion_producto_no_disponible(
+                        'agotado_cotizacion', nombre,
+                        default_mensaje=(
+                            "No tengo suficiente stock de ese producto para la "
+                            "cantidad que necesitas en este momento."
+                        ),
+                        default_escalar=False,
+                        motivo_escalar=f"Producto agotado sin alternativas: {nombre}",
+                    )
         except Exception as e:
             logger.warning("_verificar_stock_o_sugerir: error buscando alternativas: %s", e)
-            msg += "No pude buscar alternativas. Ofrece escalar a asesor."
+            msg += _instruccion_producto_no_disponible(
+                'agotado_cotizacion', nombre,
+                default_mensaje=(
+                    "No tengo suficiente stock de ese producto para la "
+                    "cantidad que necesitas en este momento."
+                ),
+                default_escalar=False,
+                motivo_escalar=f"Producto agotado sin alternativas: {nombre}",
+            )
         return msg
 
     def _merge_bot_context(updates: dict):
@@ -1855,7 +1941,12 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 precio_str = ""
                 if _partner_id:
                     price = _get_product_price_for_client(p["id"], _partner_id)
-                    if price is not None:
+                    # price <= 0 no es un precio real (regla de pricelist rota/faltante,
+                    # no un producto gratis) — no mostrarlo como si lo fuera. La tool
+                    # obtener_precio (llamada SIEMPRE antes de cotizar/agregar) es la
+                    # que realmente bloquea con la categoría precio_invalido; acá solo
+                    # se evita filtrar un "$0" en el listado de candidatos.
+                    if price is not None and price > 0:
                         precio_str = _fmt_currency(price)
                 parts = [
                     f"NOMBRE_EXACTO:{p.get('name', '')}",
@@ -1880,6 +1971,18 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                     icon = "✅" if v["en_stock"] else "❌ agotado"
                     partes_var.append(f"{v['nombre']} {icon}")
                 lines.append(f"    🎨 Variantes: {' | '.join(partes_var)}")
+
+        if hay_agotados:
+            _mensaje_agotado, _escalar_agotado = _obtener_respuesta_producto(
+                'agotado_busqueda', ref,
+                default_mensaje="Ese producto está agotado en este momento 😕 En cuanto tengamos disponibilidad te aviso.",
+                default_escalar=False,
+            )
+            lines.append(
+                f"Para los productos ❌ AGOTADO, dile al cliente algo como: '{_mensaje_agotado}'"
+                + (f" Luego usa escalar_a_asesor con motivo 'Producto agotado: {ref}'."
+                   if _escalar_agotado else " NO escales solo por esto.")
+            )
 
         lines.append("")
         if tarjeta_result:
@@ -1919,12 +2022,19 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 return (
                     f"Encontré '{referencia}' en catálogo pero SIN precio configurado "
                     f"para la lista de precios de este canal.\n"
-                    f"NO inventes ni informes precio de lista. Dile al cliente que vas a "
-                    f"confirmar el precio con un asesor y usa escalar_a_asesor con motivo "
-                    f"'Producto sin precio en lista del canal: {referencia}'."
+                    + _instruccion_producto_no_disponible(
+                        'sin_precio_canal', referencia,
+                        default_mensaje=(
+                            "Encontré esa referencia en catálogo, pero no tengo el precio "
+                            "confirmado para dártelo con seguridad. Voy a pasar tu "
+                            "conversación a un asesor para que te lo confirme. 🙏"
+                        ),
+                        default_escalar=True,
+                        motivo_escalar=f"Producto sin precio en lista del canal: {referencia}",
+                    )
                 )
             if busqueda_tipo.startswith('repuesto_no_encontrado'):
-                return _msg_repuesto_no_encontrado(busqueda_tipo, referencia)
+                return _msg_repuesto_no_encontrado(busqueda_tipo, referencia, _instruccion_producto_no_disponible)
             if busqueda_tipo.startswith('ambigua_marca'):
                 _marcas = busqueda_tipo.split(':', 1)[1] if ':' in busqueda_tipo else ''
                 return (
@@ -1936,12 +2046,18 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 )
             return (
                 f"No encontre productos para '{referencia}'.\n"
-                f"Dile al cliente algo como: 'No encuentro esta referencia en nuestro "
-                f"catálogo actualmente, pero no te preocupes 😊 Voy a transferir tu "
-                f"conversación a uno de nuestros asesores para que consulte la "
-                f"disponibilidad con nuestros proveedores locales y pueda prepararte "
-                f"una cotización ajustada a lo que necesitas.' Luego usa escalar_a_asesor "
-                f"con motivo 'Producto no encontrado en catálogo: {referencia}'."
+                + _instruccion_producto_no_disponible(
+                    'no_existe', referencia,
+                    default_mensaje=(
+                        "No encuentro esta referencia en nuestro catálogo actualmente, "
+                        "pero no te preocupes 😊 Voy a transferir tu conversación a uno de "
+                        "nuestros asesores para que consulte la disponibilidad con "
+                        "nuestros proveedores locales y pueda prepararte una cotización "
+                        "ajustada a lo que necesitas."
+                    ),
+                    default_escalar=True,
+                    motivo_escalar=f"Producto no encontrado en catálogo: {referencia}",
+                )
             )
         logger.info("buscar_producto: '%s' -> IDs=%s", ref, ids)
         # Resumen de variantes: mixto (Megatoner+Original) -> todo junto en secciones
@@ -1980,12 +2096,19 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 return (
                     f"Encontré '{referencia}' en catálogo pero SIN precio configurado "
                     f"para la lista de precios de este canal.\n"
-                    f"NO inventes ni informes precio de lista. Dile al cliente que vas a "
-                    f"confirmar el precio con un asesor y usa escalar_a_asesor con motivo "
-                    f"'Producto sin precio en lista del canal: {referencia}'."
+                    + _instruccion_producto_no_disponible(
+                        'sin_precio_canal', referencia,
+                        default_mensaje=(
+                            "Encontré esa referencia en catálogo, pero no tengo el precio "
+                            "confirmado para dártelo con seguridad. Voy a pasar tu "
+                            "conversación a un asesor para que te lo confirme. 🙏"
+                        ),
+                        default_escalar=True,
+                        motivo_escalar=f"Producto sin precio en lista del canal: {referencia}",
+                    )
                 )
             if busqueda_tipo.startswith('repuesto_no_encontrado'):
-                return _msg_repuesto_no_encontrado(busqueda_tipo, referencia)
+                return _msg_repuesto_no_encontrado(busqueda_tipo, referencia, _instruccion_producto_no_disponible)
             if busqueda_tipo.startswith('ambigua_marca'):
                 _marcas = busqueda_tipo.split(':', 1)[1] if ':' in busqueda_tipo else ''
                 return (
@@ -1997,12 +2120,18 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 )
             return (
                 f"No encontre productos para '{referencia}'.\n"
-                f"Dile al cliente algo como: 'No encuentro esta referencia en nuestro "
-                f"catálogo actualmente, pero no te preocupes 😊 Voy a transferir tu "
-                f"conversación a uno de nuestros asesores para que consulte la "
-                f"disponibilidad con nuestros proveedores locales y pueda prepararte "
-                f"una cotización ajustada a lo que necesitas.' Luego usa escalar_a_asesor "
-                f"con motivo 'Producto no encontrado en catálogo: {referencia}'."
+                + _instruccion_producto_no_disponible(
+                    'no_existe', referencia,
+                    default_mensaje=(
+                        "No encuentro esta referencia en nuestro catálogo actualmente, "
+                        "pero no te preocupes 😊 Voy a transferir tu conversación a uno de "
+                        "nuestros asesores para que consulte la disponibilidad con "
+                        "nuestros proveedores locales y pueda prepararte una cotización "
+                        "ajustada a lo que necesitas."
+                    ),
+                    default_escalar=True,
+                    motivo_escalar=f"Producto no encontrado en catálogo: {referencia}",
+                )
             )
         logger.info("buscar_producto_cotizacion: '%s' -> IDs=%s", ref, ids)
         # Resumen de variantes: mixto (Megatoner+Original) -> todo junto en secciones
@@ -2098,6 +2227,23 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             discount = li.get("discount", 0)
             prod_name = (li.get("product_id") or [None, str(product_id)])[1]
             desc_txt = f" (descuento {discount:.0f}%)" if discount else ""
+            # price <= 0 no es un precio real (regla de pricelist rota/faltante o
+            # producto sin costo cargado) — nunca debe llegar al cliente como si lo
+            # fuera. Detección nueva: antes no había ningún chequeo acá, así que un
+            # $0 calculado se le informaba tal cual (caso real: CARCNN4730/Generica,
+            # 2026-08-03 — root cause distinto, is_published, pero el síntoma fue
+            # justo este: "$1 COP" mostrado como precio real).
+            if price <= 0:
+                return _instruccion_producto_no_disponible(
+                    'precio_invalido', prod_name,
+                    default_mensaje=(
+                        "Tengo un inconveniente para confirmarte el precio de este "
+                        "producto en este momento. Voy a pasar tu conversación a un "
+                        "asesor para que te lo confirme. 🙏"
+                    ),
+                    default_escalar=True,
+                    motivo_escalar=f"Precio inválido calculado (${price:.0f}) para {prod_name} (product_id={product_id})",
+                )
             # Actualizar carrito: precio y cantidad solicitada
             if ch_id:
                 upd = dict(
@@ -3528,7 +3674,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         # Reutilizar la misma lógica de búsqueda tokenizada
         prods, ids, ref, busqueda_tipo = _buscar_producto_core(query)
         if not prods and busqueda_tipo.startswith('repuesto_no_encontrado'):
-            return _msg_repuesto_no_encontrado(busqueda_tipo, query)
+            return _msg_repuesto_no_encontrado(busqueda_tipo, query, _instruccion_producto_no_disponible)
 
         template_ids = []
         if prods:
@@ -3541,7 +3687,21 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             template_ids = list(tmpl_ids_set)
 
         if not template_ids:
-            return f"No se encontró el producto '{query}' en nuestra base de datos."
+            return (
+                f"No se encontró el producto '{query}' en nuestra base de datos.\n"
+                + _instruccion_producto_no_disponible(
+                    'no_existe', query,
+                    default_mensaje=(
+                        "No encuentro esta referencia en nuestro catálogo actualmente, "
+                        "pero no te preocupes 😊 Voy a transferir tu conversación a uno de "
+                        "nuestros asesores para que consulte la disponibilidad con "
+                        "nuestros proveedores locales y pueda prepararte una cotización "
+                        "ajustada a lo que necesitas."
+                    ),
+                    default_escalar=True,
+                    motivo_escalar=f"Producto no encontrado en catálogo: {query}",
+                )
+            )
 
         # 3. Obtener datos de los productos encontrados
         try:
@@ -4230,9 +4390,23 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 f"| Qty:{r['qty']} | {icon} | {stock}"
             )
         for ref in not_found_refs:
-            lines.append(f"[PRODUCTO_NO_ENCONTRADO: {ref}]")
+            lines.append(
+                f"[PRODUCTO_NO_ENCONTRADO: {ref}]\n"
+                + _instruccion_producto_no_disponible(
+                    'no_existe', ref,
+                    default_mensaje=(
+                        "No encuentro esta referencia en nuestro catálogo actualmente, "
+                        "pero no te preocupes 😊 Voy a transferir tu conversación a uno de "
+                        "nuestros asesores para que consulte la disponibilidad con "
+                        "nuestros proveedores locales y pueda prepararte una cotización "
+                        "ajustada a lo que necesitas."
+                    ),
+                    default_escalar=True,
+                    motivo_escalar=f"Producto no encontrado en catálogo: {ref}",
+                )
+            )
         for ref, bt in repuestos_nf:
-            lines.append(_msg_repuesto_no_encontrado(bt, ref))
+            lines.append(_msg_repuesto_no_encontrado(bt, ref, _instruccion_producto_no_disponible))
 
         if not lines:
             return "No se encontraron productos para las referencias indicadas."

@@ -3991,6 +3991,48 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             logger.error("agregar_envio_orden: order_id=%s error=%s", order_id, e)
             return f"No pude agregar el envio automaticamente: {str(e)}. Solicita a tu asesor que lo gestione."
 
+    @tool
+    def quitar_envio_orden(order_id: int) -> str:
+        """Quita el envío de la orden (línea de domicilio + carrier) — usar cuando el
+        cliente dice que va a recoger en tienda DESPUÉS de que ya se agregó envío con
+        agregar_envio_orden (ej. cambió de opinión, o se agregó por error). Si la orden
+        no tiene envío asignado, no hace nada y lo informa (no es un error).
+
+        Caso real que motivó esta tool: cliente pidió cotización, se le agregó envío
+        sin haber pedido domicilio, el cliente aclaró que iba a recoger en tienda, y
+        el agente no tenía forma de deshacer el envío — tuvo que escalar a un asesor
+        solo para quitar una línea.
+        """
+        order_id, _rec = _resolver_order_id_cliente(order_id, estados=("draft", "sent"))
+        if not order_id:
+            return (
+                "❌ Cotización no encontrada o no pertenece al cliente actual — "
+                "NO se quitó envío. Verifica el ORDER_ID (usa el numérico de "
+                "crear_cotizacion/agregar_linea_cotizacion, no los dígitos del nombre)."
+            )
+        try:
+            orders = odoo.read("sale.order", [order_id], ["name", "carrier_id"])
+            if not orders:
+                return f"Orden {order_id} no encontrada."
+            order = orders[0]
+            if not order.get("carrier_id"):
+                return f"La orden {order['name']} no tiene envío asignado — no hay nada que quitar."
+            carrier_name = order["carrier_id"][1] if isinstance(order["carrier_id"], list) else str(order["carrier_id"])
+
+            delivery_lines = odoo.search_read(
+                "sale.order.line",
+                [["order_id", "=", order_id], ["is_delivery", "=", True]],
+                ["id"],
+            )
+            if delivery_lines:
+                odoo.execute_kw("sale.order.line", "unlink", [[l["id"] for l in delivery_lines]])
+            odoo.execute_kw("sale.order", "write", [[order_id], {"carrier_id": False}])
+
+            logger.info("quitar_envio_orden: order_id=%s carrier_removido=%s", order_id, carrier_name)
+            return f"✅ Envío quitado de la orden {order['name']} (era: {carrier_name}). Ya no se cobra domicilio."
+        except Exception as e:
+            logger.error("quitar_envio_orden: order_id=%s error=%s", order_id, e)
+            return f"No pude quitar el envío automáticamente: {str(e)}. Solicita a tu asesor que lo gestione."
 
     @tool
     def verificar_historial_envio(partner_id: int) -> str:
@@ -4434,6 +4476,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         enviar_firma_entrega,
         calcular_envio_orden,
         agregar_envio_orden,
+        quitar_envio_orden,
         verificar_historial_envio,
         buscar_referencias_mensaje,
     ]

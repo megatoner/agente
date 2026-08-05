@@ -590,6 +590,21 @@ def run_agent(
         )
         dynamic_context += _hq_block
 
+    # Inyectar método de pago sugerido por historial (ver jwb_agent_bridge.py /
+    # jwb_obtener_pago_sugerido). Es SOLO una sugerencia — nunca asumir sin
+    # confirmar, es plata real; no aplica a clientes de crédito (no pasan por
+    # esta pregunta).
+    _pago_sug = ctx.get("pago_sugerido") or {}
+    if _pago_sug.get("ok"):
+        dynamic_context += (
+            f"\n\n[MÉTODO DE PAGO HABITUAL DE ESTE CLIENTE — {_pago_sug.get('metodo', '')}"
+            f" ({_pago_sug.get('detalle', '')}), última vez el {_pago_sug.get('fecha', '')}]\n"
+            "Es una sugerencia para agilizar, NO un dato confirmado. Si vas a preguntar "
+            "forma de pago, ofrécela primero como atajo (ej.: \"¿pagas igual que la vez "
+            "pasada, por transferencia?\") pero SIEMPRE espera la confirmación del cliente "
+            "antes de proceder — nunca asumas el método sin que el cliente lo confirme.\n"
+        )
+
     # Inyectar mensajes recientes del canal (incluyendo respuestas de asesores humanos)
     _recent_msgs = ctx.get("recent_channel_messages") or []
     if _recent_msgs:

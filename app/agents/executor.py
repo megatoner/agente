@@ -519,6 +519,8 @@ def run_agent(
         _cart_block = f"\n\n[CARRITO DE COMPRA — {_cart.get('name', f'ID:{_carrito_id}')}]\n"
         if _cart_order_id:
             _cart_block += f"Cotización abierta: order_id={_cart_order_id}\n"
+        if _cart.get("estado_pedido"):
+            _cart_block += f"Estado del pedido: {_cart['estado_pedido']}\n"
 
         _cart_block += "Productos en carrito:\n"
         _needs_price = []
@@ -575,6 +577,8 @@ def run_agent(
     if _hq_order_id:
         _hq_block = f"\n\n[COTIZACIÓN ABIERTA — preparada por un asesor: {_human_quote.get('name', '')}]\n"
         _hq_block += f"order_id={_hq_order_id} | Total: ${_human_quote.get('amount_total', 0):,.0f}\n"
+        if _human_quote.get("estado_pedido"):
+            _hq_block += f"Estado del pedido: {_human_quote['estado_pedido']}\n"
         for _l in _human_quote.get("lines") or []:
             _hq_block += (
                 f"  • {_l.get('product_name', '')} × {_l.get('qty', 0):.0f} = "

@@ -912,6 +912,25 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 "con el ID elegido para fijarla en el pedido — si no la fijas, el pedido puede quedar "
                 "con OTRA dirección de la empresa, distinta de la que confirmó el cliente."
             )
+        # Solo si YA hay algo guardado y quien escribe ES la empresa (no un
+        # empleado): si el cliente da una dirección NUEVA que no coincide con
+        # ninguna de arriba, se le puede preguntar si prefiere actualizar la
+        # principal (permanente) o guardar una dirección de envío adicional.
+        # Con un empleado NUNCA se pregunta esto (no tiene autoridad sobre la
+        # dirección fiscal/DIAN de la empresa) — completar_datos_facturacion
+        # ya crea una dirección nueva automáticamente en ese caso, sin pedir
+        # confirmación. Caso real: GYM PLUS / GYMPLUS ROBLEDO S.A.S.,
+        # canal 846, 2026-08-04.
+        if direcciones and res.get("escribe_la_empresa"):
+            lineas.append(
+                "Quien escribe ES la empresa (no un empleado). Si te da una dirección "
+                "NUEVA (que no sea ninguna de las de arriba), puedes preguntarle: "
+                "'¿actualizamos tu dirección principal o la guardamos como una dirección "
+                "de envío adicional?'. Solo si pide expresamente reemplazar la principal, "
+                "pasa actualizar_direccion_principal=true en completar_datos_facturacion "
+                "junto con la dirección — si no dice nada o prefiere una nueva, no pases "
+                "ese parámetro (se crea una dirección adicional, sin tocar la principal)."
+            )
         return "\n".join(lineas)
 
     def _estado_datos_facturacion():
@@ -970,17 +989,29 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         departamento: str = "",
         indicaciones: str = "",
         nombre_sede: str = "",
+        actualizar_direccion_principal: bool = False,
     ) -> str:
         """Guarda en Odoo los datos de facturación/envío que el cliente dio: documento,
-        correo, teléfono y/o una dirección de envío nueva (se agrega como dirección
-        ADICIONAL, nunca reemplaza una existente). Llenar SOLO lo que el cliente
+        correo, teléfono y/o una dirección de envío. Llenar SOLO lo que el cliente
         respondió; no inventar valores. tipo_documento: 'nit' o 'cedula'. Si mandó
         foto del RUT, usar el NIT y la razón social de ese documento.
+
         Dirección (nomenclatura vial colombiana): via_principal código ('CR','CL',
         'AV','DG','TV'), numero_1 (ej '74'), complemento_1 (letra), numero_2/
         complemento_2 (tras el '#'), numero_puerta (tras el '-'), direccional_1/2
         (Norte/Sur/Oriente/Occidente), interior/interior_numero (ej 'Apartamento'/'301').
         ciudad es OBLIGATORIA para el código postal — si falta, preguntarla antes de llamar.
+
+        La dirección se procesa sola, sin necesidad de otra llamada aparte: 1) si ya
+        coincide con una guardada (de él o de la empresa), se reutiliza esa, sin crear
+        duplicados; 2) si no, se guarda como principal (primera vez) o como dirección de
+        envío ADICIONAL nueva; 3) en cualquier caso queda fijada automáticamente como la
+        dirección de envío del pedido activo — no hace falta llamar
+        seleccionar_direccion_envio después de esto.
+        actualizar_direccion_principal=true SOLO tiene efecto cuando quien escribe ES la
+        empresa (ver aviso "escribe_la_empresa" en consultar_datos_facturacion) y el
+        cliente pidió expresamente reemplazar su dirección principal en vez de crear una
+        nueva — con un empleado este parámetro se ignora siempre.
         """
         if not ch_id:
             return "Sin canal activo, no se puede guardar."
@@ -996,6 +1027,8 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             vals["correo"] = correo.strip()
         if telefono:
             vals["telefono"] = telefono.strip()
+        if actualizar_direccion_principal:
+            vals["actualizar_direccion_principal"] = True
         if nombre_sede:
             vals["nombre_sede"] = nombre_sede.strip()
 
@@ -1040,9 +1073,26 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         if resumen.get("direccion"):
             dd = resumen["direccion"]
             cp_txt = dd["codigo_postal"] if dd.get("geocodificado") else "PENDIENTE (un asesor la completará)"
-            partes.append(
-                f"Dirección guardada: {dd['etiqueta']} — {dd['calle']}, {dd['ciudad']} — Código postal: {cp_txt}"
-            )
+            if dd.get("ya_existia"):
+                partes.append(
+                    f"Dirección: coincide con una que ya teníamos guardada — "
+                    f"{dd['etiqueta']} — {dd['calle']}, {dd['ciudad']}"
+                )
+            else:
+                partes.append(
+                    f"Dirección guardada: {dd['etiqueta']} — {dd['calle']}, {dd['ciudad']} — Código postal: {cp_txt}"
+                )
+            if dd.get("orden_actualizada"):
+                partes.append(
+                    "Ya quedó fijada como la dirección de envío del pedido activo "
+                    "— no hace falta llamar seleccionar_direccion_envio."
+                )
+            if dd.get("similares"):
+                _sim = "; ".join(f"{s['etiqueta']} ({s['calle']})" for s in dd["similares"])
+                partes.append(
+                    f"⚠️ Esta dirección se parece a más de una ya guardada ({_sim}) — "
+                    "antes de seguir, confírmale al cliente cuál es exactamente para no duplicar."
+                )
         if resumen.get("direccion_error"):
             partes.append(f"⚠️ {resumen['direccion_error']}")
         if not partes:
@@ -1053,9 +1103,11 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
     def seleccionar_direccion_envio(order_id: int, direccion_id: int) -> str:
         """Fija la dirección de envío del pedido a una de las direcciones EXISTENTES
         devueltas por consultar_datos_facturacion (usa el ID de esa lista, NUNCA
-        inventes uno). Llamar SIEMPRE que el cliente confirme o elija una dirección
-        de envío — sin esto el pedido puede quedar con otra dirección de la empresa,
-        distinta de la que el cliente confirmó."""
+        inventes uno). Llamar SIEMPRE que el cliente confirme o elija cuál de las
+        direcciones YA GUARDADAS usar — sin esto el pedido puede quedar con otra
+        dirección de la empresa, distinta de la que el cliente confirmó.
+        NO hace falta llamarla cuando el cliente da una dirección NUEVA: eso se
+        maneja con completar_datos_facturacion, que ya la fija sola en el pedido."""
         if not ch_id:
             return "Sin canal activo, no se puede aplicar la dirección."
         try:

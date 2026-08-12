@@ -2951,20 +2951,28 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             url = "https://" + url.lstrip("/")
         return url, lleva
 
-    def _fmt_estado_envio(pick, carriers):
+    def _fmt_estado_envio(pick, carriers, ruta_info=None):
         """(icono, estado, fecha, lineas_extra) para un stock.picking.
 
         x_entregado es la confirmación REAL de entrega al cliente (toggle manual
         del repartidor/ruta, ver jpc_custom stock_picking.py) — state=='done' solo
         significa que el picking se validó (mercancía alistada/despachada), NO que
         el cliente ya la recibió. No tratar 'done' como entregado.
+
+        ruta_info (dict de _ruta_info, opcional): si el ÚLTIMO intento de ruta
+        quedó 'fallida', x_entregado puede seguir en True por un bug de datos
+        del toggle manual (11 pickings reales confirmados 2026-08-12) — sin
+        este chequeo se muestra "✅ Entregado" arriba y "⚠️ Entrega NO
+        completada" en la sub-línea de ruta, un mensaje contradictorio para
+        el cliente. Con ruta_info disponible, la parada fallida manda.
         """
         carrier = pick.get("carrier_id")
         carrier_id = carrier[0] if isinstance(carrier, list) else carrier
         info = carriers.get(carrier_id, {})
         es_recoge_tienda = info.get("in_store", False)
+        ruta_fallida = bool(ruta_info) and ruta_info.get("estado") == "fallida"
 
-        if pick.get("x_entregado"):
+        if pick.get("x_entregado") and not ruta_fallida:
             icon, estado = "✅", "Entregado"
             fecha = _fmt_date(str(pick.get("x_entregado_at") or pick.get("date_done") or ""))
         elif pick.get("state") == "done":
@@ -3017,6 +3025,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
     _VENTANA_JORNADA = {
         "manana": "entre las 9:00 a. m. y la 1:00 p. m.",
         "tarde": "entre las 12:00 m. y las 5:00 p. m.",
+        "todo": "en el transcurso del día",
     }
     _NOVEDAD_LABEL = {
         "cerrado": "el local estaba cerrado",
@@ -3098,7 +3107,12 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             out[pid] = {
                 "linea_id": l["id"],
                 "tiene_firma": l["id"] in con_firma,
-                "entregado": bool(l.get("is_delivered")),
+                # is_delivered también queda True en entregas FALLIDAS (bug
+                # confirmado en jpc_ruta_fallida_wizard.py, 33 casos reales en
+                # BD) — sin el estado_parada != 'fallida' de abajo esto
+                # reportaría "✅ Entregado" en una entrega que en realidad no
+                # se completó.
+                "entregado": bool(l.get("is_delivered")) and (l.get("estado_parada") or "") != "fallida",
                 "estado": l.get("estado_parada") or "",
                 "novedad": l.get("novedad") or "",
                 "comentarios": (l.get("comentarios") or "").strip(),
@@ -3148,6 +3162,39 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             )
         return out
 
+    def _texto_pickings(pids: list) -> list:
+        """Líneas de texto (icono/estado/fecha, transportadora+guía+link si es
+        transportadora externa, o ruta/franja/hora-real/firma si es mensajero
+        propio) para los pickings de UN pedido. Compartido entre estado_entrega
+        y consultar_estado_pedido_cliente — un solo lugar para mantener esta
+        lógica y para que un fix (ej. fallida-vs-entregado) beneficie a ambas
+        tools en vez de arreglarse una vez y quedar roto en la otra."""
+        if not pids:
+            return ["  ⏳ Sin despacho generado aún"]
+        lines = []
+        picks = odoo.read("stock.picking", pids, _PICKING_FIELDS_ENTREGA)
+        active_picks = [p for p in picks if p.get("state") != "cancel"]
+        cancelled_picks = [p for p in picks if p.get("state") == "cancel"]
+        carriers = _carrier_map(active_picks)
+        rutas = _ruta_info([p["id"] for p in active_picks])
+        for pick in active_picks:
+            icon, estado, fecha, extra = _fmt_estado_envio(pick, carriers, rutas.get(pick["id"]))
+            lines.append(
+                f"  {icon} {pick.get('name')} (picking_id={pick['id']}) | {estado} | {fecha}"
+            )
+            for ex in extra:
+                lines.append(f"      {ex}")
+            # Datos del módulo de ruta (hora real, novedad, firma, posición).
+            # Solo aplican a envíos con mensajero propio: si hay guía de
+            # rastreo el paquete lo lleva una transportadora externa y no
+            # existe parada de ruta ni firma nuestra.
+            if not (pick.get("carrier_tracking_ref") or "").strip():
+                for rl in _linea_ruta_texto(rutas.get(pick["id"])):
+                    lines.append(f"      {rl}")
+        if not active_picks and cancelled_picks:
+            lines.append("  ⚠️ El despacho fue cancelado pero el pedido sigue activo — puede estar pendiente de reprogramación")
+        return lines
+
     @tool
     def estado_entrega(order_id: int) -> str:
         """Consultar el estado de entrega de un pedido: estado del pedido, de cada envío,
@@ -3160,31 +3207,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         order_state_map = {"sale":"Confirmado (activo)","done":"Cerrado","cancel":"Cancelado","draft":"Borrador"}
         order_state = order_state_map.get(o.get("state",""), o.get("state",""))
         lines = [f"Pedido: {o.get('name')} — Estado del pedido: {order_state}"]
-        pids = o.get("picking_ids", [])
-        if not pids:
-            lines.append("  ⏳ Sin despacho generado aún")
-        else:
-            picks = odoo.read("stock.picking", pids, _PICKING_FIELDS_ENTREGA)
-            active_picks = [p for p in picks if p.get("state") != "cancel"]
-            cancelled_picks = [p for p in picks if p.get("state") == "cancel"]
-            carriers = _carrier_map(active_picks)
-            rutas = _ruta_info([p["id"] for p in active_picks])
-            for pick in active_picks:
-                icon, estado, fecha, extra = _fmt_estado_envio(pick, carriers)
-                lines.append(
-                    f"  {icon} {pick.get('name')} (picking_id={pick['id']}) | {estado} | {fecha}"
-                )
-                for ex in extra:
-                    lines.append(f"      {ex}")
-                # Datos del módulo de ruta (hora real, novedad, firma, posición).
-                # Solo aplican a envíos con mensajero propio: si hay guía de
-                # rastreo el paquete lo lleva una transportadora externa y no
-                # existe parada de ruta ni firma nuestra.
-                if not (pick.get("carrier_tracking_ref") or "").strip():
-                    for rl in _linea_ruta_texto(rutas.get(pick["id"])):
-                        lines.append(f"      {rl}")
-            if not active_picks and cancelled_picks:
-                lines.append("  ⚠️ El despacho fue cancelado pero el pedido sigue activo — puede estar pendiente de reprogramación")
+        lines.extend(_texto_pickings(o.get("picking_ids", [])))
         return "\n".join(lines)
 
 
@@ -3856,74 +3879,44 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
     @tool
     def consultar_estado_pedido_cliente(partner_id: int) -> str:
-        """Consulta el estado del ultimo pedido activo del cliente usando el campo de etiqueta de entrega.
-        Informa si esta en preparacion, en ruta con hora estimada, entregado o fallido.
-        Usar cuando el cliente pregunte por su pedido, domicilio, entrega o envio."""
+        """Consulta el estado completo del último pedido activo del cliente: si está
+        facturado, alistado, en ruta (con franja horaria aproximada, nunca hora exacta)
+        o entregado (con hora real si es mensajero propio). Si fue por transportadora
+        externa da el nombre, la guía y el link de rastreo. Usar cuando el cliente
+        pregunte por su pedido, domicilio, entrega o envío sin dar un número de orden
+        puntual — si ya tienes un order_id específico usa estado_entrega(order_id)."""
         try:
-            from datetime import datetime, timezone, timedelta
             orders = odoo.search_read(
                 "sale.order",
                 [("partner_id", "child_of", _commercial_id(partner_id) or partner_id), ("state", "in", ["sale", "done"])],
-                ["name", "state", "delivery_status", "jpc_entrega_label", "date_order"],
+                ["name", "state", "invoice_status", "date_order", "picking_ids"],
                 limit=1,
                 order="date_order desc",
             )
             if not orders:
-                return "No encontre pedidos activos para este cliente."
+                return "No encontré pedidos activos para este cliente."
 
             order = orders[0]
-            label = (order.get("jpc_entrega_label") or "").strip()
             name = order["name"]
-            date_str = str(order.get("date_order") or "")
-            age_days = 999
-            if date_str:
-                try:
-                    dt = datetime.fromisoformat(date_str.replace(" ", "T"))
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    age_days = (datetime.now(timezone.utc) - dt).days
-                except Exception:
-                    pass
+            # Facturación: nivel simple (invoiced vs pendiente), igual convención
+            # que jpc_custom. El detalle de envío/entrega viene del helper
+            # compartido con estado_entrega — ahí vive la regla de nunca
+            # prometer hora exacta, y la distinción correcta despachado-vs-
+            # entregado (x_entregado, no solo picking state=='done'). Ver
+            # project_entregas_ruta_rastreo.md — "marcamos como entregado" en
+            # cuanto se le entrega a la transportadora fue el bug de fondo que
+            # esta reescritura corrige (reemplaza el parche puntual del caso
+            # LUIS del 2026-08-12, que usaba delivery_status=='full').
+            invoice_status = order.get("invoice_status") or ""
+            factura_line = "Facturado ✅" if invoice_status == "invoiced" else "Pendiente de facturar"
 
-            if not label:
-                return (
-                    f"Su pedido *{name}* esta en preparacion y aun no ha sido despachado. "
-                    "En cuanto salga a domicilio te avisamos. Puedes comunicarte con tu asesor si necesitas urgencia."
-                )
-
-            label_lower = label.lower()
-            hora = label.replace("(", "").replace(")", "").strip()
-            # Extraer solo la hora del formato "Entrega (12:00)"
-            import re as _re2
-            m = _re2.search(r"\((\d{1,2}:\d{2})\)", label)
-            hora_str = m.group(1) if m else hora
-
-            if label_lower.startswith("entregada"):
-                if age_days > 5:
-                    return (
-                        f"No tienes pedidos recientes activos. "
-                        f"El ultimo pedido ({name}) fue entregado hace {age_days} dias."
-                    )
-                return f"Checkmark *Su pedido {name} fue entregado* a las {hora_str}. Esperamos que todo este perfecto! Si tienes algun inconveniente cuename."
-
-            if label_lower.startswith("fallida"):
-                return (
-                    f"El domiciliario intento entregar tu pedido *{name}* a las {hora_str} "
-                    "pero no fue posible la entrega. Tu asesor te contactara para reprogramar. "
-                    "Si necesitas urgencia puedes comunicarte directamente."
-                )
-
-            if label_lower.startswith("entrega"):
-                return (
-                    f"Su pedido *{name}* esta *en ruta* y llegara aproximadamente a las *{hora_str}*. "
-                    "Asegurate de tener alguien disponible para recibirlo."
-                )
-
-            return f"Estado de tu pedido *{name}*: {label}"
+            lines = [f"Pedido: {name} — {factura_line}"]
+            lines.extend(_texto_pickings(order.get("picking_ids", [])))
+            return "\n".join(lines)
 
         except Exception as e:
             logger.error("consultar_estado_pedido_cliente: %s", e)
-            return "No pude consultar el estado del pedido en este momento. Comunicate con tu asesor."
+            return "No pude consultar el estado del pedido en este momento. Comunícate con tu asesor."
 
 
     @tool

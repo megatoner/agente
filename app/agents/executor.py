@@ -26,8 +26,15 @@ _PRECIO_RE = re.compile(r'\$\s?\d{1,3}(?:[.,]\d{3})+')
 _PRICE_RETRY_MSG = (
     "[SISTEMA] Tu respuesta incluye un precio pero NO llamaste ninguna herramienta "
     "en este turno. Los precios recordados de turnos anteriores pueden estar errados "
-    "o desactualizados. Llama buscar_producto u obtener_precio AHORA y responde "
-    "únicamente con los precios que retorne la herramienta."
+    "o desactualizados. Si es un precio de PRODUCTO nuevo o que no has confirmado con "
+    "una herramienta en esta conversación, llama buscar_producto u obtener_precio AHORA "
+    "y responde únicamente con los precios que retorne la herramienta. Si en cambio es "
+    "un TOTAL que ya armaste en esta misma conversación con una herramienta (crear_cotizacion, "
+    "agregar_linea_cotizacion, agregar_envio_orden, obtener_cotizacion) — por ejemplo el cliente "
+    "solo está confirmando forma de pago o dirección — no hace falta volver a buscarlo: continúa "
+    "la conversación con naturalidad. En AMBOS casos, NUNCA le expliques al cliente tu razonamiento "
+    "interno (que si el precio es correcto, de dónde salió, que no lo inventaste, que no necesitas "
+    "volver a consultar, etc.) — eso es narrar tu proceso interno y es un error grave."
 )
 
 DEFAULT_SYSTEM_PROMPT = """Eres un agente experto en Odoo ERP. Tu trabajo es ayudar al usuario a gestionar el sistema Odoo usando las herramientas disponibles.

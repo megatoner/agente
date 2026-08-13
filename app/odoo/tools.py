@@ -1004,8 +1004,11 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
         La dirección se procesa sola, sin necesidad de otra llamada aparte: 1) si ya
         coincide con una guardada (de él o de la empresa), se reutiliza esa, sin crear
-        duplicados; 2) si no, se guarda como principal (primera vez) o como dirección de
-        envío ADICIONAL nueva; 3) en cualquier caso queda fijada automáticamente como la
+        duplicados; 1b) si coincide con MÁS DE UNA a la vez (ambigua), NO se crea ni se
+        fija nada — la respuesta trae las opciones para que le preguntes al cliente cuál
+        es, y luego uses seleccionar_direccion_envio con la que elija; 2) si no coincide
+        con ninguna, se guarda como principal (primera vez) o como dirección de envío
+        ADICIONAL nueva; 3) en el caso 1 o 2 queda fijada automáticamente como la
         dirección de envío del pedido activo — no hace falta llamar
         seleccionar_direccion_envio después de esto.
         actualizar_direccion_principal=true SOLO tiene efecto cuando quien escribe ES la
@@ -1072,27 +1075,35 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             partes.append(f"⚠️ {resumen['documento_error']}")
         if resumen.get("direccion"):
             dd = resumen["direccion"]
-            cp_txt = dd["codigo_postal"] if dd.get("geocodificado") else "PENDIENTE (un asesor la completará)"
-            if dd.get("ya_existia"):
+            if dd.get("ambigua"):
+                _sim = "; ".join(
+                    f"ID:{s['id']} {s['etiqueta']} ({s['calle']})" for s in dd.get("similares", [])
+                )
                 partes.append(
-                    f"Dirección: coincide con una que ya teníamos guardada — "
-                    f"{dd['etiqueta']} — {dd['calle']}, {dd['ciudad']}"
+                    f"⚠️ Esa dirección coincide con MÁS DE UNA ya guardada ({_sim}) — "
+                    "NO se creó ninguna dirección nueva ni se tocó el pedido todavía. "
+                    "Pregúntale al cliente cuál de estas es exactamente (o si es una dirección "
+                    "distinta a ambas) antes de seguir. Si elige una de las guardadas, usa "
+                    "seleccionar_direccion_envio(order_id, ID) con el ID indicado — NUNCA "
+                    "vuelvas a llamar completar_datos_facturacion con esta misma dirección "
+                    "esperando que se cree, eso sería el mismo duplicado otra vez."
                 )
             else:
-                partes.append(
-                    f"Dirección guardada: {dd['etiqueta']} — {dd['calle']}, {dd['ciudad']} — Código postal: {cp_txt}"
-                )
-            if dd.get("orden_actualizada"):
-                partes.append(
-                    "Ya quedó fijada como la dirección de envío del pedido activo "
-                    "— no hace falta llamar seleccionar_direccion_envio."
-                )
-            if dd.get("similares"):
-                _sim = "; ".join(f"{s['etiqueta']} ({s['calle']})" for s in dd["similares"])
-                partes.append(
-                    f"⚠️ Esta dirección se parece a más de una ya guardada ({_sim}) — "
-                    "antes de seguir, confírmale al cliente cuál es exactamente para no duplicar."
-                )
+                cp_txt = dd["codigo_postal"] if dd.get("geocodificado") else "PENDIENTE (un asesor la completará)"
+                if dd.get("ya_existia"):
+                    partes.append(
+                        f"Dirección: coincide con una que ya teníamos guardada — "
+                        f"{dd['etiqueta']} — {dd['calle']}, {dd['ciudad']}"
+                    )
+                else:
+                    partes.append(
+                        f"Dirección guardada: {dd['etiqueta']} — {dd['calle']}, {dd['ciudad']} — Código postal: {cp_txt}"
+                    )
+                if dd.get("orden_actualizada"):
+                    partes.append(
+                        "Ya quedó fijada como la dirección de envío del pedido activo "
+                        "— no hace falta llamar seleccionar_direccion_envio."
+                    )
         if resumen.get("direccion_error"):
             partes.append(f"⚠️ {resumen['direccion_error']}")
         if not partes:

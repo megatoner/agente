@@ -37,6 +37,36 @@ _PRICE_RETRY_MSG = (
     "volver a consultar, etc.) — eso es narrar tu proceso interno y es un error grave."
 )
 
+# ── Guard anti-alucinación de envío ──────────────────────────────────────────
+# Las cotizaciones nacen con "Recolección en tienda" preasignada (ver tools.py,
+# calcular_envio_orden) — la ÚNICA forma de que un pedido quede con domicilio
+# real es llamando agregar_envio_orden. Si el agente CONFIRMA un pedido
+# (confirmar_orden) en el mismo turno en que su respuesta promete domicilio
+# ("te lo entregamos en...", "el domiciliario...") sin haber llamado
+# agregar_envio_orden ni calcular_envio_orden, el pedido queda con recogida
+# en tienda mientras el cliente cree que le mandan un domiciliario — mismo
+# patrón que el guard de precios, pero para envío. Caso real: Asistente SH /
+# SANTIAGO CORREA (573216084948), pedido S55550, 2026-08-12 — el cliente
+# preguntó "cuándo me entregan" en una ráfaga de mensajes cortos, el agente
+# confirmó el pedido con texto de domicilio sin llamar agregar_envio_orden;
+# el picking quedó cerrado como recogida en tienda el mismo día.
+_ENVIO_RE = re.compile(
+    r'entregamos en|domiciliario|te (lo|los) (entregamos|enviamos|llevamos)|'
+    r'pasamos a (entregar|dejarte)|sale (para|hacia) tu direcci[oó]n',
+    re.IGNORECASE,
+)
+
+_ENVIO_RETRY_MSG = (
+    "[SISTEMA] Tu respuesta confirma el pedido (confirmar_orden) y promete domicilio/entrega "
+    "en dirección, pero NO llamaste agregar_envio_orden ni calcular_envio_orden en este turno. "
+    "Las cotizaciones nacen con 'Recolección en tienda' preasignada — si no llamas "
+    "agregar_envio_orden, el pedido queda con esa recogida en tienda por defecto aunque tu "
+    "mensaje diga que va a domicilio, y el cliente se queda esperando un domiciliario que nunca "
+    "sale. Si el cliente SÍ pidió domicilio (verbos de envío o preguntó por hora/día de entrega), "
+    "llama agregar_envio_orden(order_id) AHORA, antes de confirmar. Si en realidad es recogida en "
+    "tienda, corrige tu respuesta: no menciones domiciliario ni una dirección de entrega."
+)
+
 DEFAULT_SYSTEM_PROMPT = """Eres un agente experto en Odoo ERP. Tu trabajo es ayudar al usuario a gestionar el sistema Odoo usando las herramientas disponibles.
 
 REGLAS:
@@ -145,6 +175,7 @@ def _run_with_anthropic_client(
     output = ""
     iterations = 0
     _price_retry_done = False
+    _envio_retry_done = False
     usage = {"input_tokens": 0, "output_tokens": 0, "cache_write_tokens": 0, "cache_read_tokens": 0}
 
     # Anthropic separa system del resto de mensajes
@@ -214,6 +245,23 @@ def _run_with_anthropic_client(
                 )
                 call_kwargs["messages"] = call_kwargs["messages"] + [
                     {"role": "user", "content": _PRICE_RETRY_MSG}
+                ]
+                continue
+            # Guard: confirmó el pedido y promete domicilio, pero no llamó
+            # agregar_envio_orden/calcular_envio_orden en el turno → forzar
+            # re-verificación (1 vez).
+            if ("confirmar_orden" in tools_used and "agregar_envio_orden" not in tools_used
+                    and "calcular_envio_orden" not in tools_used and not _envio_retry_done
+                    and anthropic_tools and i < max_iterations - 1
+                    and _ENVIO_RE.search(output or "")):
+                _envio_retry_done = True
+                logger.warning(
+                    "run_agent anthropic: session=%s confirmó pedido con texto de domicilio "
+                    "sin agregar_envio_orden — forzando re-verificación",
+                    session_id,
+                )
+                call_kwargs["messages"] = call_kwargs["messages"] + [
+                    {"role": "user", "content": _ENVIO_RETRY_MSG}
                 ]
                 continue
             logger.info(
@@ -308,6 +356,7 @@ def _run_with_openai_client(
     output = ""
     iterations = 0
     _price_retry_done = False
+    _envio_retry_done = False
     usage = {"input_tokens": 0, "output_tokens": 0, "cache_write_tokens": 0, "cache_read_tokens": 0}
 
     call_kwargs = {"model": model_name, "tools": openai_tools or None}
@@ -349,6 +398,18 @@ def _run_with_openai_client(
                     session_id,
                 )
                 messages.append({"role": "user", "content": _PRICE_RETRY_MSG})
+                continue
+            if ("confirmar_orden" in tools_used and "agregar_envio_orden" not in tools_used
+                    and "calcular_envio_orden" not in tools_used and not _envio_retry_done
+                    and openai_tools and i < max_iterations - 1
+                    and _ENVIO_RE.search(output or "")):
+                _envio_retry_done = True
+                logger.warning(
+                    "run_agent: session=%s confirmó pedido con texto de domicilio "
+                    "sin agregar_envio_orden — forzando re-verificación",
+                    session_id,
+                )
+                messages.append({"role": "user", "content": _ENVIO_RETRY_MSG})
                 continue
             logger.info(
                 "run_agent: session=%s iter=%s FINAL output_len=%s tools_used=%s",

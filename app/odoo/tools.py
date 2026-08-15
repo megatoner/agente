@@ -4433,9 +4433,18 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             # Crear sugerencia de aprendizaje si no fue exacto
             if confidence in ("similar", "numero") and ch_id:
                 try:
+                    # args=[] (no []]): registrar_sugerencia es @api.model, no
+                    # espera una lista de ids posicional — pasar [[]] hacía
+                    # que Odoo bindeara ese [] como primer argumento
+                    # posicional (term), chocando con el mismo "term" que
+                    # además se manda como kwarg más abajo → TypeError "got
+                    # multiple values for argument 'term'" en el 100% de los
+                    # intentos desde que existe esta llamada (228 fallos en
+                    # los últimos 30 días, jpc.search.term.suggestion nunca
+                    # tuvo ni un solo registro real). Encontrado 2026-08-15.
                     odoo.execute_kw(
                         "jpc.search.term.suggestion", "registrar_sugerencia",
-                        [[]], {
+                        [], {
                             "term": ref,
                             "product_id": best["id"],
                             "channel_id": ch_id,

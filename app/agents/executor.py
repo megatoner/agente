@@ -18,24 +18,57 @@ import re
 logger = logging.getLogger(__name__)
 
 # ── Guard anti-alucinación de precios ────────────────────────────────────────
-# Si la respuesta final contiene un precio pero el agente NO llamó ninguna
-# herramienta en el turno, el precio viene de su memoria de la sesión (puede
-# estar inventado o desactualizado) — se fuerza un reintento con re-búsqueda.
+# Dos disparadores:
+# 1. La respuesta final contiene un precio pero el agente NO llamó ninguna
+#    herramienta en el turno → el precio viene de su memoria de la sesión
+#    (puede estar inventado o desactualizado).
+# 2. La respuesta menciona uno o más códigos de producto entre paréntesis
+#    (ej. "Tóner HP 30A (CF230A)") que NO aparecen en el resultado de ninguna
+#    herramienta llamada en el turno — el agente SÍ llamó una tool (por eso el
+#    disparador 1 no aplica), pero mezcló resultados reales con un ítem extra
+#    inventado en la misma lista. Caso real: AGROPIÑAS DE ANTIOQUIA SAS
+#    (573023177888), 2026-08-14 — el cliente preguntó "¿todos esos sirven?"
+#    sobre 3 productos ya mostrados (Tambor 32A, Tóner 30X con/sin chip); MIA
+#    respondió con esos 2 reales + un "Tóner HP 30A (CF230A) — $40.000"
+#    inexistente en catálogo, tomado de una referencia que una imagen había
+#    mencionado (informativa, no un producto confirmado) — y de paso se comió
+#    el 30X sin chip real. La sesión NO persiste resultados de tools entre
+#    turnos (solo guarda los últimos 6 mensajes de texto plano, ver
+#    app/memory/store.py) — por eso cualquier código de producto mencionado
+#    DEBE venir del resultado de una tool de ESTE mismo turno; no hay otra
+#    fuente confiable.
 _PRECIO_RE = re.compile(r'\$\s?\d{1,3}(?:[.,]\d{3})+')
+_CODIGO_PRODUCTO_RE = re.compile(r'\(([A-Z]{1,4}[\-/]?\d{2,4}[A-Z0-9\-/]{0,8})\)')
 
 _PRICE_RETRY_MSG = (
-    "[SISTEMA] Tu respuesta incluye un precio pero NO llamaste ninguna herramienta "
-    "en este turno. Los precios recordados de turnos anteriores pueden estar errados "
-    "o desactualizados. Si es un precio de PRODUCTO nuevo o que no has confirmado con "
-    "una herramienta en esta conversación, llama buscar_producto u obtener_precio AHORA "
-    "y responde únicamente con los precios que retorne la herramienta. Si en cambio es "
-    "un TOTAL que ya armaste en esta misma conversación con una herramienta (crear_cotizacion, "
-    "agregar_linea_cotizacion, agregar_envio_orden, obtener_cotizacion) — por ejemplo el cliente "
-    "solo está confirmando forma de pago o dirección — no hace falta volver a buscarlo: continúa "
-    "la conversación con naturalidad. En AMBOS casos, NUNCA le expliques al cliente tu razonamiento "
+    "[SISTEMA] Tu respuesta incluye un precio y/o código de producto (entre paréntesis) "
+    "que no quedó confirmado por ninguna herramienta en este turno. Los precios recordados "
+    "de turnos anteriores, o mezclados con datos de una imagen analizada, pueden estar "
+    "errados, desactualizados o no existir en catálogo. Si es un producto nuevo o que no has "
+    "confirmado con una herramienta en esta conversación, llama buscar_producto u "
+    "obtener_precio AHORA para CADA producto que vayas a mencionar y responde ÚNICAMENTE con "
+    "los productos y precios que esas herramientas retornen — no agregues ningún producto "
+    "adicional que no haya salido de una búsqueda real en este turno, aunque una imagen "
+    "analizada haya mencionado una referencia parecida (esa referencia es solo informativa, "
+    "no un producto confirmado en catálogo). Si en cambio es un TOTAL que ya armaste en esta "
+    "misma conversación con una herramienta (crear_cotizacion, agregar_linea_cotizacion, "
+    "agregar_envio_orden, obtener_cotizacion) — por ejemplo el cliente solo está confirmando "
+    "forma de pago o dirección — no hace falta volver a buscarlo: continúa la conversación "
+    "con naturalidad. En TODOS los casos, NUNCA le expliques al cliente tu razonamiento "
     "interno (que si el precio es correcto, de dónde salió, que no lo inventaste, que no necesitas "
     "volver a consultar, etc.) — eso es narrar tu proceso interno y es un error grave."
 )
+
+
+def _precio_o_codigo_no_verificado(output: str, tools_used: list, tool_results_text: str) -> bool:
+    """Detecta los 2 disparadores del guard anti-alucinación de precios (ver
+    comentario arriba). `tool_results_text` es la concatenación de todos los
+    resultados de tools de ESTE turno (ver acumulación en los loops de abajo)."""
+    output = output or ""
+    if not tools_used:
+        return bool(_PRECIO_RE.search(output))
+    codigos = _CODIGO_PRODUCTO_RE.findall(output)
+    return any(c not in tool_results_text for c in codigos)
 
 # ── Guard anti-alucinación de envío ──────────────────────────────────────────
 # Las cotizaciones nacen con "Recolección en tienda" preasignada (ver tools.py,
@@ -176,6 +209,7 @@ def _run_with_anthropic_client(
     iterations = 0
     _price_retry_done = False
     _envio_retry_done = False
+    _tool_results_text = ""
     usage = {"input_tokens": 0, "output_tokens": 0, "cache_write_tokens": 0, "cache_read_tokens": 0}
 
     # Anthropic separa system del resto de mensajes
@@ -233,13 +267,14 @@ def _run_with_anthropic_client(
                 b.text for b in response.content
                 if hasattr(b, "text") and getattr(b, "type", "") == "text"
             )
-            # Guard: precio en la respuesta sin haber llamado ninguna tool en
-            # el turno → el precio es de memoria; forzar re-búsqueda (1 vez)
-            if (not tools_used and not _price_retry_done and anthropic_tools
-                    and i < max_iterations - 1 and _PRECIO_RE.search(output or "")):
+            # Guard: precio sin ninguna tool en el turno, O código de producto
+            # entre paréntesis que no aparece en los resultados de tools de
+            # este turno → forzar re-búsqueda (1 vez, ver comentario arriba)
+            if (not _price_retry_done and anthropic_tools and i < max_iterations - 1
+                    and _precio_o_codigo_no_verificado(output, tools_used, _tool_results_text)):
                 _price_retry_done = True
                 logger.warning(
-                    "run_agent anthropic: session=%s precio sin tools en output — "
+                    "run_agent anthropic: session=%s precio/código sin verificar en output — "
                     "forzando re-búsqueda",
                     session_id,
                 )
@@ -305,6 +340,8 @@ def _run_with_anthropic_client(
                 result = f"Herramienta {tool_name} no disponible."
                 logger.warning("run_agent anthropic: session=%s tool=%s NOT FOUND", session_id, tool_name)
 
+            _tool_results_text += str(result) + "\n"
+
             tool_results.append({
                 "type": "tool_result",
                 "tool_use_id": tool_id,
@@ -357,6 +394,7 @@ def _run_with_openai_client(
     iterations = 0
     _price_retry_done = False
     _envio_retry_done = False
+    _tool_results_text = ""
     usage = {"input_tokens": 0, "output_tokens": 0, "cache_write_tokens": 0, "cache_read_tokens": 0}
 
     call_kwargs = {"model": model_name, "tools": openai_tools or None}
@@ -388,13 +426,14 @@ def _run_with_openai_client(
 
         if finish != "tool_calls" or not tool_calls:
             output = _extract_text(choice.message.content)
-            # Guard: precio en la respuesta sin haber llamado ninguna tool en
-            # el turno → el precio es de memoria; forzar re-búsqueda (1 vez)
-            if (not tools_used and not _price_retry_done and openai_tools
-                    and i < max_iterations - 1 and _PRECIO_RE.search(output or "")):
+            # Guard: precio sin ninguna tool en el turno, O código de producto
+            # entre paréntesis que no aparece en los resultados de tools de
+            # este turno → forzar re-búsqueda (1 vez, ver comentario arriba)
+            if (not _price_retry_done and openai_tools and i < max_iterations - 1
+                    and _precio_o_codigo_no_verificado(output, tools_used, _tool_results_text)):
                 _price_retry_done = True
                 logger.warning(
-                    "run_agent: session=%s precio sin tools en output — forzando re-búsqueda",
+                    "run_agent: session=%s precio/código sin verificar en output — forzando re-búsqueda",
                     session_id,
                 )
                 messages.append({"role": "user", "content": _PRICE_RETRY_MSG})
@@ -447,6 +486,8 @@ def _run_with_openai_client(
             else:
                 result = f"Herramienta {tool_name} no encontrada o no habilitada."
                 logger.warning("run_agent: session=%s tool=%s NOT FOUND", session_id, tool_name)
+
+            _tool_results_text += str(result) + "\n"
 
             messages.append({
                 "role": "tool",

@@ -6,3 +6,6 @@ __pycache__/
 
 # Datos del harness de evaluacion: contienen datos de clientes
 eval/data/
+
+# Bitácora local de uso de IA (runtime, no código) — ver app/agents/usage_log.py
+logs/

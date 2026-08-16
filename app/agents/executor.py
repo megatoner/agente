@@ -8,6 +8,7 @@ Ventajas vs. versión anterior:
 """
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from app.agents.providers import get_llm
+from app.agents.usage_log import log_usage
 from app.odoo.tools import create_odoo_tools
 from app.memory.store import store_memory, get_session_memories
 from sqlalchemy.orm import Session
@@ -251,10 +252,18 @@ def _run_with_anthropic_client(
 
         _u = getattr(response, "usage", None)
         if _u:
-            usage["input_tokens"] += getattr(_u, "input_tokens", 0) or 0
-            usage["output_tokens"] += getattr(_u, "output_tokens", 0) or 0
-            usage["cache_write_tokens"] += getattr(_u, "cache_creation_input_tokens", 0) or 0
-            usage["cache_read_tokens"] += getattr(_u, "cache_read_input_tokens", 0) or 0
+            _in = getattr(_u, "input_tokens", 0) or 0
+            _out = getattr(_u, "output_tokens", 0) or 0
+            _cw = getattr(_u, "cache_creation_input_tokens", 0) or 0
+            _cr = getattr(_u, "cache_read_input_tokens", 0) or 0
+            usage["input_tokens"] += _in
+            usage["output_tokens"] += _out
+            usage["cache_write_tokens"] += _cw
+            usage["cache_read_tokens"] += _cr
+            # Bitácora local ANTES de seguir — sobrevive aunque el proceso
+            # muera más adelante en este mismo turno (ver docstring de
+            # usage_log.py). Registra esta llamada puntual, no el acumulado.
+            log_usage(session_id, model_name, iterations, _in, _out, _cw, _cr)
 
         # Agregar respuesta del asistente al historial
         call_kwargs["messages"] = call_kwargs["messages"] + [

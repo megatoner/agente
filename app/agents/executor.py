@@ -712,6 +712,42 @@ def run_agent(
         )
         dynamic_context += _hq_block
 
+    # Pedidos CONFIRMADOS muy recientes del mismo cliente (ver
+    # jwb_agent_bridge.py::_pedidos_confirmados_recientes) — red de
+    # seguridad contra burbujas concurrentes del mismo canal WhatsApp: el
+    # chequeo de "cesión a burbuja posterior" del lado de Odoo solo
+    # descarta el TEXTO de una respuesta tardía, nunca revierte tool calls
+    # ya ejecutadas (crear_cotizacion/confirmar_orden quedan reales aunque
+    # la respuesta se descarte). Sin esta señal, un turno nuevo no tiene
+    # forma de saber que el pedido ya se confirmó segundos/minutos antes.
+    # Casos reales: SAN NICOLAS MEJIA Y CIA SCA (3 pedidos confirmados por
+    # 1 sola compra), KE MONDONGO SAS (2 cotizaciones confirmadas y
+    # facturadas por separado), ambos 2026-08-12. Decisión explícita del
+    # usuario: NO bloquear la creación de otro pedido (una segunda compra
+    # legítima existe) — solo exigir que el agente pregunte primero.
+    _pedidos_recientes = ctx.get("pedidos_confirmados_recientes") or []
+    if _pedidos_recientes:
+        _pr_block = "\n\n[⚠️ PEDIDO(S) YA CONFIRMADO(S) RECIENTEMENTE]\n"
+        for _p in _pedidos_recientes:
+            _pr_block += (
+                f"• Pedido {_p.get('name', '')} — confirmado hace "
+                f"{_p.get('confirmado_hace_minutos', '?')} min — "
+                f"Total: ${_p.get('amount_total', 0):,.0f}\n"
+            )
+            for _l in _p.get("lines") or []:
+                _pr_block += f"    - {_l.get('product_name', '')} × {_l.get('qty', 0):.0f}\n"
+        _pr_block += (
+            "IMPORTANTE: es posible que el mensaje del cliente sea sobre ESE MISMO "
+            "pedido (ej. llegó en varios mensajes seguidos, o está preguntando por "
+            "algo que ya quedó resuelto). Si el cliente menciona productos iguales "
+            "o parecidos a los de arriba, NO llames crear_cotizacion/confirmar_orden "
+            "de nuevo sin antes preguntarle explícitamente si es un pedido aparte o "
+            "el mismo que ya se confirmó (ej. \"¿esto es aparte del pedido que ya te "
+            "confirmé, o es lo mismo?\"). Si el cliente confirma que es un pedido "
+            "distinto, procede normal.\n"
+        )
+        dynamic_context += _pr_block
+
     # Inyectar método de pago sugerido por historial (ver jwb_agent_bridge.py /
     # jwb_obtener_pago_sugerido). Es SOLO una sugerencia — nunca asumir sin
     # confirmar, es plata real; no aplica a clientes de crédito (no pasan por

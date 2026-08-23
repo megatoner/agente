@@ -204,7 +204,14 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
     _cart = (odoo_context or {}).get("cart") or {}
     # Almacén del bot para filtro de stock (0 = sin restricción)
     _warehouse_id = int((odoo_context or {}).get("bot_warehouse_id") or 0)
-    _wh_ctx = {"warehouse": _warehouse_id} if _warehouse_id else {}
+    # OJO: la clave es 'warehouse_id'. Odoo 19 lee
+    # context['warehouse_id'] or context['search_warehouse']
+    # (stock/models/product.py:356) y 'warehouse' a secas se IGNORA en silencio:
+    # qty_available devuelve entonces el stock de TODOS los almacenes.
+    # Caso real 2026-08-22 (MEGATINTAS): el bot Distribuidor ofreció 7 tintas 544
+    # agotadas en su almacén porque existían en el de Usuario Final; un asesor
+    # tuvo que apagar el bot.
+    _wh_ctx = {"warehouse_id": _warehouse_id} if _warehouse_id else {}
     # Lista de precios del bot (se aplica a nuevas cotizaciones)
     _bot_pricelist_id = int((odoo_context or {}).get("bot_pricelist_id") or 0)
     # Política cuando un producto NO tiene regla en la pricelist del bot:

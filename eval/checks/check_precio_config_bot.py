@@ -63,8 +63,8 @@ def precio_con_lista(product_id, partner_id, pricelist_id, warehouse_id=None):
 
 
 bot = call('jpc.whatsapp.bot.config', 'read', [4],
-           fields=['name', 'pricelist1_id', 'warehouse_id'])[0]
-PL = bot['pricelist1_id'][0]
+           fields=['name', 'default_pricelist_id', 'warehouse_id'])[0]
+PL = bot['default_pricelist_id'][0]
 WH = bot['warehouse_id'][0]
 # Un cliente cualquiera del canal Distribuidor sirve de sujeto de prueba.
 PARTNER = call('res.partner', 'search', [['is_company', '=', True]], limit=1)[0]

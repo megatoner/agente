@@ -45,19 +45,19 @@ def check(nombre, cond, detalle=''):
 
 
 bot = call('jpc.whatsapp.bot.config', 'read', [4],
-           fields=['name', 'pricelist1_id', 'warehouse_id', 'price_fallback'])[0]
+           fields=['name', 'default_pricelist_id', 'warehouse_id', 'price_fallback'])[0]
 partner = call('res.partner', 'search', [['is_company', '=', True]], limit=1)[0]
 
 ctx = {
     'partner_id': partner,
-    'bot_pricelist_id': bot['pricelist1_id'][0],
+    'bot_pricelist_id': bot['default_pricelist_id'][0],
     'bot_warehouse_id': bot['warehouse_id'][0],
     'price_fallback': bot['price_fallback'],
     # sin channel_id: no se envían tarjetas ni se toca ningún carrito real
 }
 tools = {t.name: t for t in create_odoo_tools(ctx)}
 
-print(f"\nBot: {bot['name']} · lista {bot['pricelist1_id'][1]}")
+print(f"\nBot: {bot['name']} · lista {bot['default_pricelist_id'][1]}")
 print(f"Tools disponibles: {len(tools)}")
 
 print("\n1) El HP 38A (regla en $0) no se ofrece")

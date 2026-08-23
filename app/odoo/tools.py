@@ -212,6 +212,16 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
     # agotadas en su almacén porque existían en el de Usuario Final; un asesor
     # tuvo que apagar el bot.
     _wh_ctx = {"warehouse_id": _warehouse_id} if _warehouse_id else {}
+    if not _warehouse_id:
+        # Sin almacén, qty_available suma TODOS: el bot puede ofrecer lo que su
+        # bodega no tiene. Es config faltante, no un modo de operación — se avisa
+        # en vez de fallar callado, que fue lo que dejó pasar el caso MEGATINTAS
+        # cuatro meses. Los tres bots tienen almacén desde 2026-08-23.
+        logger.warning(
+            "STOCK SIN FILTRAR: el bot no tiene bot_warehouse_id; qty_available "
+            "sumará todos los almacenes y puede ofrecer productos agotados en el "
+            "suyo. Configurar 'Almacén' en jpc.whatsapp.bot.config."
+        )
     # Lista de precios del bot (se aplica a nuevas cotizaciones)
     _bot_pricelist_id = int((odoo_context or {}).get("bot_pricelist_id") or 0)
     # Política cuando un producto NO tiene regla en la pricelist del bot:

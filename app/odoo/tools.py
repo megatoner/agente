@@ -645,10 +645,18 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         _precio_canal_cache[product_id] = ok
         return ok
 
+    _precio_cliente_cache = {}
+
     def _get_product_price_for_client(product_id, partner_id):
         """Precio unitario a qty=1 con la pricelist del bot (default_pricelist_id). Retorna float o None."""
         if not partner_id:
             return None
+        # Cada llamada crea y borra una sale.order: en un mismo turno se pedía el
+        # precio del mismo producto varias veces (listado, resumen, tarjeta) y se
+        # pagaba entero cada vez. El precio no cambia dentro del turno.
+        _ck = (product_id, partner_id)
+        if _ck in _precio_cliente_cache:
+            return _precio_cliente_cache[_ck]
         try:
             order_vals = {
                 "partner_id": partner_id,
@@ -666,10 +674,32 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             lines = odoo.read("sale.order.line", [line_id], ["price_unit"])
             odoo.execute_kw("sale.order", "unlink", [[order_id]])
             if lines:
-                return float(lines[0].get("price_unit") or 0)
+                _precio = float(lines[0].get("price_unit") or 0)
+                _precio_cliente_cache[_ck] = _precio
+                return _precio
         except Exception as e:
             logger.warning("_get_product_price_for_client product=%s: %s", product_id, e)
         return None
+
+    def _precio_es_vendible(product_id):
+        """False si el producto calcula un precio de 0 con la pricelist del bot.
+
+        Un $0 nunca es un precio real: es una regla de pricelist rota o faltante.
+        Caso real 2026-08-23 (lista 11 'Canales'): el HP 38A/42X/45A y el HP 37A
+        calculaban $0 por reglas duplicadas, y el bot Distribuidor los ofrecía
+        gratis — ya se materializó en el pedido S48158 (2 unidades a $0).
+
+        `obtener_precio` ya bloqueaba el $0 al cotizar, pero el producto igual
+        aparecía en el listado y en el resumen: el cliente lo veía ofrecido y solo
+        al pedirlo se escalaba. Ante la duda (sin partner, o error de cálculo) se
+        devuelve True: ocultar de más dejaría al cliente sin ver productos buenos.
+        """
+        if not _partner_id:
+            return True
+        precio = _get_product_price_for_client(product_id, _partner_id)
+        if precio is None:
+            return True
+        return precio > 0
 
     # ── CLIENTES ──────────────────────────────────────────────────────────
 
@@ -1977,6 +2007,23 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             if not _con_precio:
                 return [], [], ref, 'sin_precio_canal'
             prods = _con_precio
+        # Un precio de 0 no se muestra NUNCA, en ningún bot: no es un producto
+        # gratis, es una regla de pricelist rota. Va aparte del bloque 'hide' de
+        # arriba —que solo mira si EXISTE una regla— porque una regla puede existir
+        # y valer 0 (lista 11 'Canales': HP 38A y HP 37A, 2026-08-23). Aplica a
+        # listado, resumen y tarjetas a la vez, que es lo que ve el cliente.
+        if prods and _partner_id:
+            _vendibles = [p for p in prods if _precio_es_vendible(p["id"])]
+            if len(_vendibles) != len(prods):
+                _ocultos = [p["id"] for p in prods if p not in _vendibles]
+                logger.warning(
+                    "PRECIO $0: %d producto(s) ocultado(s) por calcular precio 0 en "
+                    "pricelist=%s ref=%r ids=%s — revisar reglas de esa lista",
+                    len(prods) - len(_vendibles), _bot_pricelist_id, ref, _ocultos,
+                )
+            if not _vendibles:
+                return [], [], ref, 'sin_precio_canal'
+            prods = _vendibles
         # ids solo incluye productos en stock (para envío de tarjetas)
         ids = [p["id"] for p in prods if p.get("en_stock")]
         return prods, ids, ref, busqueda_tipo
@@ -2240,6 +2287,10 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                             "partner_id": _partner_id,
                             "state": "draft",
                             "payment_method_id": 215,
+                            # Sin la pricelist del bot esto calculaba con la del
+                            # cliente (o la genérica) y guardaba en el carrito un
+                            # precio distinto del que el bot debe cobrar.
+                            **({"pricelist_id": _bot_pricelist_id} if _bot_pricelist_id else {}),
                         })
                         line_id = odoo.create("sale.order.line", {
                             "order_id": order_id,
@@ -2371,6 +2422,12 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         }
         if _bot_pricelist_id:
             vals["pricelist_id"] = _bot_pricelist_id
+        # El almacén también es configuración del bot. Sin esto la orden tomaba el
+        # almacén por defecto del usuario bot_agent: de los pedidos del bot
+        # Distribuidor, 108 salieron de GRUPO-MED-UF y solo 33 de su GRUPO-MED-DIS,
+        # así que se cotizaba stock de una bodega y se despachaba de otra.
+        if _warehouse_id:
+            vals["warehouse_id"] = _warehouse_id
         if nota:
             vals["note"] = nota
         new_id = odoo.create("sale.order", vals)
@@ -3691,6 +3748,8 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                     "state": "draft",
                     "payment_method_id": 215,
                     **({"pricelist_id": _bot_pricelist_id} if _bot_pricelist_id else {}),
+                    # Igual que crear_cotizacion: el almacén es config del bot.
+                    **({"warehouse_id": _warehouse_id} if _warehouse_id else {}),
                 })
             orders = odoo.read("sale.order", [order_id], ["name", "amount_total"])
             order_name = orders[0]["name"] if orders else str(order_id)

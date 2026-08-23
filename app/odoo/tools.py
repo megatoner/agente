@@ -583,28 +583,35 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             logger.warning("_base_url: %s", e)
             return ""
 
-    def _enviar_tarjetas_auto(ids: list, max_cards: int = 3) -> str:
-        """Envía tarjetas de producto por WhatsApp. Retorna mensaje de estado."""
+    def _ficha_producto(ids: list, max_prods: int = 3) -> str:
+        """Ficha de producto lista para copiar, en UN solo mensaje.
+
+        Sustituye al envío automático de tarjetas. La tarjeta la mandaba el CÓDIGO
+        como efecto secundario de buscar, antes de que el modelo hubiera decidido
+        si el producto era el correcto, así que el cliente recibía dos mensajes y
+        el segundo podía contradecir al primero (caso Hernan 2026-08-23: tarjeta
+        del Tóner HP 12A seguida de "tu DeskJet usa HP 61"). Ahora esto solo
+        DEVUELVE texto; enviarlo o no es decisión del modelo.
+
+        Los precios los calcula Odoo con la configuración del bot —dos listas en
+        Usuario Final, unidad/caja en Distribuidor— para que no puedan inventarse.
+        """
         if not ch_id:
-            return "⚠️ Sin canal WhatsApp — no se pueden enviar tarjetas."
-        ids_cut = ids[:max(1, min(3, int(max_cards)))]
+            return ""
+        ids_cut = ids[:max(1, min(3, int(max_prods)))]
         try:
             result = odoo.execute_kw(
-                "discuss.channel", "jwb_enviar_tarjeta_v3",
+                "discuss.channel", "jwb_texto_producto",
                 [[ch_id], ids_cut],
             )
-            enviados = result.get("enviados", 0) if isinstance(result, dict) else 0
-            errors = result.get("errors", []) if isinstance(result, dict) else []
-            if enviados > 0:
-                msg = f"✅ {enviados} tarjeta(s) enviada(s) al cliente."
-                if errors:
-                    msg += f" ({len(errors)} con error)"
-                return msg
-            err_str = "; ".join(errors[:2]) if errors else "sin detalles"
-            return f"⚠️ No se pudo enviar tarjetas. Error: {err_str}"
-        except Exception as e:
-            logger.exception("_enviar_tarjetas_auto: error RPC")
-            return f"❌ Error enviando tarjetas: {str(e)[:200]}"
+            if not isinstance(result, dict):
+                return ""
+            if result.get("errors"):
+                logger.warning("_ficha_producto: %s", result["errors"][:2])
+            return result.get("texto") or ""
+        except Exception:
+            logger.exception("_ficha_producto: error RPC")
+            return ""
 
     _precio_canal_cache = {}
 
@@ -2187,18 +2194,25 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
         lines.append("")
         if tarjeta_result:
-            lines.append("✅ Tarjetas enviadas al cliente con imagen, precio y enlace.")
-            lines.append("⚠️ TU RESPUESTA DE TEXTO AL CLIENTE debe ser MUY CORTA:")
-            lines.append("   - Lista los productos disponibles con viñeta (* NOMBRE_EXACTO)")
+            lines.append("📋 FICHA LISTA PARA ENVIAR — copia este bloque TAL CUAL:")
+            lines.append("")
+            lines.append(tarjeta_result)
+            lines.append("")
+            lines.append("⚠️ CÓMO USARLA — UN SOLO MENSAJE:")
+            lines.append("   - Copia el bloque EXACTO: nombre, precios y enlace no se tocan.")
+            lines.append("     Los precios salen de la lista de ESTE bot; si los reescribes, mientes.")
+            lines.append("   - Añade tu saludo antes y la pregunta de intención al final,")
+            lines.append("     todo dentro del MISMO mensaje. Nunca mandes dos.")
+            lines.append("   - NO repitas el nombre del producto fuera del bloque: ya está ahí.")
+            lines.append("   - Si NO es el producto que el cliente pide, NO envíes el bloque:")
+            lines.append("     dilo y busca de nuevo o escala. Enviar la ficha equivocada es peor")
+            lines.append("     que no enviar nada — el cliente ve un precio que no le sirve.")
             if hay_agotados:
                 lines.append("   - MENCIONA los productos agotados (❌ AGOTADO) e indica que no están disponibles")
             if any(p.get("variantes_resumen") for p in prods):
                 lines.append("   - Si hay variantes de color, menciona cuáles están disponibles y cuáles agotadas")
-            lines.append("   - NO incluyas precio, stock ni URLs — las tarjetas ya los tienen")
             if hay_chip_info:
                 lines.append("   - Chip:X ya es un dato CONFIRMADO del producto — NO le preguntes al cliente si lo quiere con o sin chip")
-            lines.append("   - Termina con la pregunta de intención")
-            lines.append(tarjeta_result)
         else:
             lines.append("⚠️ REGLAS OBLIGATORIAS PARA TU RESPUESTA AL CLIENTE:")
             lines.append("1. Usa EXACTAMENTE el NOMBRE_EXACTO. No cambies, abrevies ni reformules el nombre del producto.")
@@ -2281,7 +2295,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 tarjeta_mostrada=True,
                 precio_mostrado=True,
             )
-        tarjeta_result = _enviar_tarjetas_auto(ids, max_cards=3)
+        tarjeta_result = _ficha_producto(ids, max_prods=3)
         return _format_producto_output(ref, prods, tarjeta_result)
 
     @tool
@@ -2347,7 +2361,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             if _trigger_resumen(prods):
                 return _build_resumen(ref, prods)
         # Enviar tarjetas WhatsApp para todos los productos encontrados
-        tarjeta_result = _enviar_tarjetas_auto(ids, max_cards=3)
+        tarjeta_result = _ficha_producto(ids, max_prods=3)
         # Registrar TODOS los productos en el carrito con precio a qty=1
         if ids and ch_id:
             for prod_data, prod_id in zip(prods[:3], ids[:3]):

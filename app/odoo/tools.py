@@ -1717,6 +1717,41 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 result.append(rep)
             return result[:20]
 
+        # Familias de impresora → línea de consumible. Una DeskJet nunca usa
+        # tóner y una LaserJet nunca usa botella de tinta, así que la palabra de
+        # familia en la consulta es un dato duro para descartar, no una pista.
+        _FAMILIAS = (
+            ('tinta', ('deskjet', 'desk jet', 'officejet', 'office jet', 'inkjet',
+                       'ink jet', 'ink tank', 'inktank', 'smart tank', 'smarttank',
+                       'ecotank', 'eco tank', 'envy', 'stylus', 'pixma', 'maxify')),
+            ('laser', ('laserjet', 'laser jet', 'colorlaserjet', 'color laser',
+                       'laserbase', 'imageclass')),
+        )
+
+        def _familia_impresora(texto):
+            """'tinta' | 'laser' | None según la familia nombrada en la consulta."""
+            t = (texto or '').lower()
+            for familia, palabras in _FAMILIAS:
+                if any(w in t for w in palabras):
+                    return familia
+            return None
+
+        def _familia_compatible(prod, familia):
+            """¿El producto pertenece a la línea de consumible de esa familia?
+
+            Se decide por la CATEGORÍA, no por el nombre: el Tóner HP 12A no dice
+            'laserjet' en su nombre, pero su categoría es 'Cartucho Laser'. Sin
+            categoría no se descarta nada — ante la duda, mostrar.
+            """
+            categ = (prod.get('categ_name') or '').lower()
+            if not categ:
+                return True
+            es_tinta = 'tinta' in categ
+            es_laser = 'laser' in categ or 'láser' in categ or 'toner' in categ or 'tóner' in categ
+            if not es_tinta and not es_laser:
+                return True
+            return es_tinta if familia == 'tinta' else es_laser
+
         def _exact(term, tmpl_filter=None):
             # Dos pasos: primero encontrar IDs de terminos exactos, luego templates.
             term_recs = odoo.search_read(
@@ -1899,7 +1934,17 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             busqueda_tipo = 'similar'
             valid_tokens = [t for t in tokens_busq if _valido_para_similar(t)]
 
-            tmpl_ids = _similar(ref_busq, _tmpl_filter)
+            # Número puro: respetar el límite de número completo, igual que en la
+            # búsqueda por token. `_similar` a secas hace ilike '%122%', que matchea
+            # el término '4122' (LaserJet 4122, del tóner HP 12A) y devuelve un
+            # producto sin relación. Caso real 2026-08-23 (Hernan, 573103720445):
+            # buscar 'HP 122' devolvía el Tóner HP 12A. La regla ya existía en
+            # `_similar_numero_completo` pero solo se aplicaba al fallback por
+            # token, no a esta primera llamada con la referencia completa.
+            if _re.fullmatch(r'\d+', ref_busq):
+                tmpl_ids = _similar_numero_completo(ref_busq, _tmpl_filter)
+            else:
+                tmpl_ids = _similar(ref_busq, _tmpl_filter)
             if not tmpl_ids:
                 if len(valid_tokens) >= 2:
                     # Interseccion de tokens: evita que un token generico devuelva demasiados
@@ -1996,6 +2041,35 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         for p in prods:
             if "en_stock" not in p:
                 p["en_stock"] = (p.get("qty_available") or 0) > 0
+
+        # Familia de impresora: un mismo número de modelo existe en la línea de
+        # tinta y en la de láser, y son consumibles incompatibles. La palabra que
+        # las distingue ('deskjet', 'laserjet') se descartaba: no tiene 2 dígitos,
+        # así que `_valido_para_similar` la rechaza y la búsqueda se queda solo
+        # con el número. Caso real 2026-08-23 (Hernan, 573103720445): "hp deskjet
+        # 3050" devolvió el Tóner HP 12A, porque el término '3050' está ligado a
+        # ese tóner por la LaserJet 3050 — correcto para láser, incompatible con
+        # una DeskJet, que es de tinta y usa HP 122 en Colombia.
+        _fam = _familia_impresora(referencia)
+        if _fam and prods:
+            _coinciden = [p for p in prods if _familia_compatible(p, _fam)]
+            if _coinciden and len(_coinciden) != len(prods):
+                logger.info(
+                    "_buscar_producto_core: familia %r descarta %d/%d resultado(s) "
+                    "de otra línea ref=%r", _fam, len(prods) - len(_coinciden),
+                    len(prods), ref,
+                )
+                prods = _coinciden
+            elif not _coinciden:
+                # Todo lo encontrado es de la otra línea: devolver eso sería peor
+                # que no encontrar nada — el cliente compraría un consumible que
+                # no le sirve. Se trata como "no existe" y escala a un asesor.
+                logger.warning(
+                    "FAMILIA INCOMPATIBLE: ref=%r es %r pero los %d resultado(s) son "
+                    "de la otra línea — no se ofrece ninguno", ref, _fam, len(prods),
+                )
+                return [], [], ref, 'ninguna'
+
         # Política de precio del bot: ocultar productos sin regla en la pricelist
         if _price_fallback == 'hide' and prods:
             _con_precio = [p for p in prods if _tiene_precio_canal(p["id"])]

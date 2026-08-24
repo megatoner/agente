@@ -1,8 +1,20 @@
 .venv/
 __pycache__/
 *.pyc
+
+# Secretos. OJO: `.env` a secas NO cubre `.env.bak` ni `.env.local` — coincide
+# exacto. Por ese hueco, `.env.bak` (con las claves reales de Anthropic, Kimi,
+# Odoo y el DATABASE_URL) quedó versionado desde julio 2026 y hubo que
+# reescribir el historial el 2026-08-24 para poder subir el repo a GitHub.
+# `*.bak.*` tampoco lo cubría: exige algo DESPUÉS de `.bak`.
 .env
+.env.*
+*.env
+*.bak
 *.bak.*
+*.orig
+secrets.*
+credentials.*
 
 # Datos del harness de evaluacion: contienen datos de clientes
 eval/data/

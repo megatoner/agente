@@ -4166,7 +4166,30 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 # Si ya tiene envio real (no recogida en tienda), no modificar
                 is_pickup = any(kw in carrier_name.lower() for kw in ['pick up', 'pickup', 'recog', 'store', 'tienda'])
                 if not is_pickup:
-                    return f"La orden {order['name']} ya tiene envio asignado: {carrier_name}. No se modifico."
+                    # ...pero solo si además YA COBRÓ el flete. Desde 2026-08-27
+                    # las órdenes heredan el método de envío del contacto, así que
+                    # tener transportista ya no implica que el envío esté
+                    # resuelto: puede venir de la ficha del cliente y no haberse
+                    # calculado nunca. Salir aquí sin línea de envío dejaría el
+                    # pedido con transportista y sin cobrar el flete — el fallo
+                    # de COSMOVISION (2026-08-14).
+                    _lineas_envio = odoo.search_read(
+                        "sale.order.line",
+                        [["order_id", "=", order_id], ["is_delivery", "=", True]],
+                        ["id"], 1,
+                    )
+                    if _lineas_envio:
+                        return (f"La orden {order['name']} ya tiene envio asignado: "
+                                f"{carrier_name}. No se modifico.")
+                    logger.info(
+                        "agregar_envio_orden: orden=%s trae transportista '%s' "
+                        "heredado del contacto pero SIN linea de envio — se calcula.",
+                        order_id, carrier_name,
+                    )
+                    # Se libera para que el wizard recalcule precio por peso y
+                    # destino; el wizard vuelve a proponer el mismo carrier,
+                    # porque sale de la misma preferencia del contacto.
+                    odoo.execute_kw("sale.order", "write", [[order_id], {"carrier_id": False}])
                 # Es Pick up in store: eliminar linea y reemplazar con envio a domicilio
                 delivery_lines = odoo.search_read(
                     "sale.order.line",

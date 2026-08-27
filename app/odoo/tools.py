@@ -4200,6 +4200,40 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                     odoo.execute_kw("sale.order.line", "unlink", [[l["id"] for l in delivery_lines]])
                 odoo.execute_kw("sale.order", "write", [[order_id], {"carrier_id": False}])
 
+            # ¿Hay una dirección de entrega REAL? Sin calle, Odoo no puede
+            # calcular ningún carrier y el wizard falla con "carrier_id nulo".
+            # Eso NO es un problema técnico que deba escalar: es que al cliente
+            # todavía no le hemos pedido la dirección.
+            #
+            # Caso real 2026-08-27, Emily (BSUID CO.1466700915216544): contacto
+            # nuevo sin dirección, pidió domicilio y la conversación se escaló;
+            # una asesora tuvo que preguntarle la dirección a mano y rehacer el
+            # pedido. 5 escalaciones así en agosto.
+            _envio = odoo.search_read(
+                "sale.order", [["id", "=", order_id]],
+                ["partner_shipping_id"], 1,
+            )
+            _dir_id = None
+            if _envio and _envio[0].get("partner_shipping_id"):
+                _psid = _envio[0]["partner_shipping_id"]
+                _dir_id = _psid[0] if isinstance(_psid, list) else _psid
+            _dir = odoo.read("res.partner", [_dir_id], ["street", "city"]) if _dir_id else None
+            if not _dir or not (_dir[0].get("street") or "").strip():
+                logger.info(
+                    "agregar_envio_orden: orden=%s sin dirección de entrega — "
+                    "se pide al cliente en vez de escalar.", order_id,
+                )
+                return (
+                    "AÚN NO SE PUEDE CALCULAR EL ENVÍO: este cliente no tiene "
+                    "dirección de entrega registrada.\n"
+                    "NO escales por esto. Pídele la dirección completa en tu "
+                    "respuesta — calle, número, barrio y ciudad — y cuando la dé, "
+                    "llama `completar_datos_facturacion` con esos datos y vuelve a "
+                    "llamar `agregar_envio_orden`.\n"
+                    "Ejemplo: '¡Listo! Para enviártelo necesito la dirección "
+                    "completa: calle, número, barrio y ciudad 📍'"
+                )
+
             # Crear wizard de envio - Odoo calcula carriers disponibles y precio segun peso/destino
             wizard_id = odoo.execute_kw(
                 "choose.delivery.carrier", "create",
@@ -4218,6 +4252,24 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 return "No se pudo leer el wizard de envio."
 
             w = wizard_data[0]
+            if not w.get("carrier_id"):
+                # Hay dirección pero Odoo no encuentra transportista que la
+                # cubra (ciudad fuera de las reglas de reparto, o dirección
+                # incompleta). Tampoco se escala a la primera: casi siempre es
+                # que falta precisar la ciudad o el barrio.
+                logger.warning(
+                    "agregar_envio_orden: orden=%s con dirección pero sin carrier "
+                    "disponible — se pide precisar en vez de escalar.", order_id,
+                )
+                return (
+                    "NO HAY TRANSPORTISTA DISPONIBLE para esa dirección.\n"
+                    "NO escales todavía. Confírmale al cliente la ciudad y el "
+                    "barrio exactos (puede que la dirección esté incompleta o "
+                    "fuera de nuestra zona de reparto) y vuelve a intentarlo con "
+                    "`completar_datos_facturacion` + `agregar_envio_orden`. "
+                    "Si al segundo intento sigue sin haber transportista, ahí sí "
+                    "escala con `escalar_a_asesor`."
+                )
             carrier_name = w["carrier_id"][1] if isinstance(w.get("carrier_id"), list) else "Envio"
             price = float(w.get("delivery_price") or 0)
 
@@ -4232,6 +4284,21 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
         except Exception as e:
             logger.error("agregar_envio_orden: order_id=%s error=%s", order_id, e)
+            # Un fallo con "carrier" casi siempre es dirección faltante o
+            # incompleta, no una avería del sistema. Decirle al agente que
+            # escale ante cualquier excepción mandaba a un humano lo que el
+            # propio cliente puede resolver en un mensaje (caso Emily,
+            # 2026-08-27). Solo se escala lo que de verdad no tiene arreglo
+            # conversacional.
+            if 'carrier' in str(e).lower():
+                return (
+                    "No se pudo calcular el envío — lo más probable es que falte "
+                    "la dirección o esté incompleta.\n"
+                    "NO escales: pídele al cliente la dirección completa (calle, "
+                    "número, barrio y ciudad), guárdala con "
+                    "`completar_datos_facturacion` y vuelve a intentar "
+                    "`agregar_envio_orden`."
+                )
             return f"No pude agregar el envio automaticamente: {str(e)}. Solicita a tu asesor que lo gestione."
 
     @tool

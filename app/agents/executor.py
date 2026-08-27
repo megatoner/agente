@@ -712,6 +712,32 @@ def run_agent(
         )
         dynamic_context += _hq_block
 
+    # Qué le falta al pedido en curso para quedar cerrado. Existe porque el
+    # cliente NO sigue el guion: interrumpe con otra pregunta a mitad del flujo,
+    # el agente la atiende, y al hacerlo pierde el hilo de lo que faltaba.
+    #
+    # Caso real 2026-08-27, FONDO DE EMPLEADOS DE PLENITUD (573116009191):
+    # el resumen quedó sin la pregunta de entrega, el cliente pidió los datos
+    # bancarios, el agente se los dio — y el pedido se quedó sin envío resuelto,
+    # con el cliente esperando un domicilio que nadie iba a despachar.
+    #
+    # La conversación tiene DOS hilos a la vez: lo que el cliente acaba de
+    # preguntar, y lo que el pedido todavía necesita. Atender uno no cancela el
+    # otro; los dos caben en el mismo mensaje.
+    _pendiente = (ctx.get("checklist_pendiente") or "").strip()
+    if _pendiente:
+        dynamic_context += (
+            "\n\n[LO QUE LE FALTA A ESTE PEDIDO]\n"
+            f"{_pendiente}\n"
+            "Esto es un hilo ABIERTO, independiente de lo que el cliente acabe de "
+            "preguntar. Responde primero lo que preguntó y RETOMA lo pendiente en "
+            "el MISMO mensaje — no lo dejes para después ni esperes a que él lo "
+            "mencione. Un cliente que pregunta por el pago no está diciendo que el "
+            "envío ya esté resuelto.\n"
+            "Ejemplo: si pide la cuenta bancaria y falta la entrega → dale la cuenta "
+            "Y pregúntale a la vez si se lo envías a su dirección o lo recoge.\n"
+        )
+
     # Pedidos CONFIRMADOS muy recientes del mismo cliente (ver
     # jwb_agent_bridge.py::_pedidos_confirmados_recientes) — red de
     # seguridad contra burbujas concurrentes del mismo canal WhatsApp: el

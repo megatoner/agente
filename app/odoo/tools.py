@@ -3665,14 +3665,23 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
     def escalar_a_asesor(motivo: str, resumen: str = "") -> str:
         """Transfiere la conversación a un asesor humano y detiene las respuestas del bot.
 
-        USAR cuando: el cliente pide una persona real, expresa molestia o reclamo formal,
-        pide descuento especial / negociación / crédito, o no puedes resolver con tus herramientas.
+        USAR cuando: el cliente expresa molestia o reclamo formal, pide descuento especial /
+        negociación / crédito, o no puedes resolver con tus herramientas.
+
+        Si SOLO pide "un asesor" sin decir para qué: pregúntale UNA vez qué necesita antes de
+        escalar (ver el bloque "Cuando el cliente PIDE UN ASESOR" del prompt) — la mitad de esos
+        casos los resuelves tú en un mensaje. Si ya se lo preguntaste, o muestra molestia o prisa,
+        escala sin insistir.
 
         Antes de llamar: envía UN mensaje cálido genérico ("Un asesor de nuestro equipo te
         escribirá pronto. 🙏") — sin nombre de asesor ni hora prometida. Después de llamar,
         no respondas nada más: el asesor toma el control.
 
-        motivo: razón específica. resumen: contexto clave para el asesor (productos, cotización).
+        motivo: razón específica.
+        resumen: OBLIGATORIO — el caso explicado para que el asesor lo atienda SIN leerse la
+        conversación entera: qué buscaba el cliente, qué le mostraste, en qué punto quedó el
+        pedido (nº de cotización y total si hay) y qué pidió textualmente. Un resumen como
+        "el cliente solicita atención de un asesor" no le sirve de nada a quien recibe el caso.
         """
         if ch_id:
             _esc_at = datetime.now(timezone.utc).isoformat()
@@ -3683,6 +3692,17 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                     partes.append("Motivo: " + motivo)
                 if resumen:
                     partes.append("Contexto: " + resumen)
+                # En qué paso quedó el pedido. Va SIEMPRE, no depende de que el
+                # agente se acuerde de contarlo: es el dato que le dice al
+                # asesor qué falta para cerrar (dirección, método de pago,
+                # informar el total...) sin releerse la conversación.
+                try:
+                    _pend = odoo.execute_kw(
+                        "jpc.whatsapp.bot.carrito", "jwb_pendientes_del_canal", [ch_id])
+                    if _pend:
+                        partes.append("Falta en el pedido: " + _pend)
+                except Exception:
+                    logger.debug("escalar_a_asesor: sin checklist para canal=%s", ch_id)
                 odoo.execute_kw(
                     "discuss.channel", "jwb_postear_nota_interna",
                     [[ch_id], " — ".join(partes)],

@@ -573,6 +573,33 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         except Exception as e:
             logger.warning("_actualizar_carrito_linea_cotizada: %s", e)
 
+    def _quitar_carrito_linea_cotizada(product_id: int):
+        """Al quitar un producto de la cotización, desvincula su línea en el carrito
+        (deja de contar como cotizada y como seleccionada para cotizar)."""
+        try:
+            carrito = odoo.search_read(
+                "jpc.whatsapp.bot.carrito",
+                [["channel_id", "=", ch_id], ["state", "in", ["open", "quoted"]]],
+                ["id"], limit=1,
+            )
+            if not carrito:
+                return
+            linea = odoo.search_read(
+                "jpc.whatsapp.bot.carrito.linea",
+                [["carrito_id", "=", carrito[0]["id"]], ["product_id", "=", product_id]],
+                ["id"], limit=1,
+            )
+            if linea:
+                odoo.execute_kw(
+                    "jpc.whatsapp.bot.carrito.linea", "write",
+                    [[linea[0]["id"]], {
+                        "sale_order_line_id": False,
+                        "seleccionado_cotizar": False,
+                    }],
+                )
+        except Exception as e:
+            logger.warning("_quitar_carrito_linea_cotizada: %s", e)
+
     def _base_url():
         # bot_agent (least-privilege) no tiene acceso directo a ir.config_parameter
         # (endurecimiento de seguridad 2026-07-08) — se usa jwb_get_base_url, que
@@ -2585,6 +2612,100 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         _actualizar_carrito_linea_cotizada(product_id, nombre, line_id, cantidad, order_id)
         return (f"✅ {order_name} — {label} × {cantidad:.0f} uds = "
                 f"{_fmt_currency(price_total)} (IVA incluido)")
+
+    @tool
+    def quitar_linea_cotizacion(order_id: int, product_id: int) -> str:
+        """Quitar un producto de una cotización en borrador o enviada — usar cuando el
+        cliente pide sacar una referencia de la cotización ("quítame el X", "solo
+        déjame los Y", "ese no lo quiero"). Después de quitarlo, informa al cliente el
+        nuevo total y sigue el flujo normal (NO escales por esto).
+
+        order_id = ID numérico de BD (el de crear_cotizacion / listar_pedidos_cliente),
+        no los dígitos del nombre. product_id = ID del producto a quitar (el mismo que
+        se usó en agregar_linea_cotizacion; si no lo tienes, míralo con obtener_cotizacion).
+
+        No toca cotizaciones ya confirmadas ni facturas. Si el producto es el único de
+        la cotización, no la deja vacía: lo informa para que confirmes con el cliente si
+        quiere cancelar todo.
+        """
+        order_id, order_rec = _resolver_order_id_cliente(order_id, estados=("draft", "sent"))
+        if not order_id:
+            return (
+                "❌ Cotización no encontrada o no pertenece al cliente actual — "
+                "NO se quitó nada. Verifica el ORDER_ID (usa el numérico de "
+                "crear_cotizacion/agregar_linea_cotizacion, no los dígitos del nombre); "
+                "si el cliente ya tiene una cotización abierta, usa listar_pedidos_cliente "
+                "para encontrar su ORDER_ID real."
+            )
+        order_name = order_rec["name"]
+
+        lines = odoo.search_read(
+            "sale.order.line",
+            [("order_id", "=", order_id)],
+            ["id", "product_id", "product_uom_qty", "display_type"],
+        )
+        producto_lines = [l for l in lines if l.get("product_id") and not l.get("display_type")]
+        objetivo = [l for l in producto_lines if l["product_id"][0] == product_id]
+
+        if not objetivo:
+            if producto_lines:
+                actuales = "; ".join(
+                    f"{_m2o(l.get('product_id'))} (product_id={l['product_id'][0]})"
+                    for l in producto_lines
+                )
+                return (
+                    f"El producto {product_id} no está en la cotización {order_name}. "
+                    f"Líneas actuales: {actuales}. Vuelve a llamar con el product_id correcto."
+                )
+            return f"La cotización {order_name} no tiene líneas de producto para quitar."
+
+        if len(producto_lines) <= len(objetivo):
+            return (
+                f"⚠️ {_m2o(objetivo[0]['product_id'])} es el único producto de la "
+                f"cotización {order_name} — no la quito para no dejarla vacía. Si el "
+                f"cliente ya no quiere nada, confírmalo y usa limpiar_carrito; si quiere "
+                f"cambiarlo por otro, agrega primero el nuevo con agregar_linea_cotizacion "
+                f"y vuelve a quitar este."
+            )
+
+        prods = odoo.read("product.product", [product_id], ["jpc_pos_name", "name", "default_code"])
+        label = product_id
+        if prods:
+            label = prods[0].get("default_code") or prods[0].get("jpc_pos_name") or prods[0]["name"]
+
+        try:
+            odoo.execute_kw("sale.order.line", "unlink", [[l["id"] for l in objetivo]])
+        except Exception as e:
+            logger.error("quitar_linea_cotizacion: order_id=%s product_id=%s error=%s",
+                         order_id, product_id, e)
+            return (f"No pude quitar {label} de la cotización automáticamente: {e}. "
+                    f"Solicita a tu asesor que lo ajuste.")
+
+        _quitar_carrito_linea_cotizada(product_id)
+        logger.info("quitar_linea_cotizacion: order_id=%s product_id=%s removido", order_id, product_id)
+
+        totales = odoo.read("sale.order", [order_id],
+                            ["amount_untaxed", "amount_tax", "amount_total"])
+        restantes = odoo.search_read(
+            "sale.order.line",
+            [("order_id", "=", order_id)],
+            ["product_id", "product_uom_qty", "price_subtotal", "display_type"],
+        )
+        items = [
+            f"  • {_m2o(l.get('product_id'))} × {l.get('product_uom_qty', 0):.0f} = "
+            f"{_fmt_currency(l.get('price_subtotal', 0))}"
+            for l in restantes if l.get("product_id") and not l.get("display_type")
+        ]
+        t = totales[0] if totales else {}
+        return (
+            f"✅ Quité {label} de la cotización {order_name}.\n"
+            + ("\n".join(items) + "\n" if items else "")
+            + f"Subtotal: {_fmt_currency(t.get('amount_untaxed', 0))}\n"
+            f"IVA: {_fmt_currency(t.get('amount_tax', 0))}\n"
+            f"Total (con IVA): {_fmt_currency(t.get('amount_total', 0))}\n\n"
+            f"Informa al cliente el nuevo total y continúa el flujo normal "
+            f"(entrega/pago). NO escales por este cambio."
+        )
 
     @tool
     def obtener_cotizacion(order_id: int) -> str:
@@ -4798,7 +4919,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         obtener_cliente_whatsapp, buscar_cliente, registrar_cliente, obtener_perfil_cliente,
         consultar_datos_facturacion, completar_datos_facturacion, seleccionar_direccion_envio,
         obtener_precio, buscar_producto, buscar_producto_cotizacion,
-        crear_cotizacion, agregar_linea_cotizacion, obtener_cotizacion, registrar_espera_respuesta,
+        crear_cotizacion, agregar_linea_cotizacion, quitar_linea_cotizacion, obtener_cotizacion, registrar_espera_respuesta,
         confirmar_orden, enviar_cotizacion_whatsapp,
         listar_facturas, obtener_factura, enviar_factura_whatsapp, enviar_factura_pdf_whatsapp,
         enviar_factura_completa_correo, estado_de_cuenta,

@@ -372,9 +372,10 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         crear la línea.
         """
         try:
-            prods = odoo.read(
-                "product.product", [product_id],
+            prods = odoo.search_read(
+                "product.product", [("id", "=", product_id)],
                 ["qty_available", "jpc_pos_name", "name", "product_tmpl_id"],
+                limit=1,
                 **({"context": _wh_ctx} if _warehouse_id else {}),
             )
         except Exception as e:

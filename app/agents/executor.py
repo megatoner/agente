@@ -57,17 +57,47 @@ _PRICE_RETRY_MSG = (
     "forma de pago o dirección — no hace falta volver a buscarlo: continúa la conversación "
     "con naturalidad. En TODOS los casos, NUNCA le expliques al cliente tu razonamiento "
     "interno (que si el precio es correcto, de dónde salió, que no lo inventaste, que no necesitas "
-    "volver a consultar, etc.) — eso es narrar tu proceso interno y es un error grave."
+    "volver a consultar, etc.) — eso es narrar tu proceso interno y es un error grave. "
+    "Conserva TAL CUAL cualquier parte de tu respuesta que ya sea correcta y no dependa del "
+    "precio en duda (ubicación, horario, políticas, información de una FAQ oficial, o una "
+    "pregunta que le habías dejado pendiente al cliente): corrige SOLO el precio/código sin "
+    "confirmar, no reescribas ni acortes el resto del mensaje."
 )
 
 
-def _precio_o_codigo_no_verificado(output: str, tools_used: list, tool_results_text: str) -> bool:
+def _solo_digitos(texto: str) -> str:
+    return re.sub(r'\D', '', texto or '')
+
+
+def _precio_o_codigo_no_verificado(
+    output: str, tools_used: list, tool_results_text: str, contexto_confiable: str = "",
+) -> bool:
     """Detecta los 2 disparadores del guard anti-alucinación de precios (ver
     comentario arriba). `tool_results_text` es la concatenación de todos los
-    resultados de tools de ESTE turno (ver acumulación en los loops de abajo)."""
+    resultados de tools de ESTE turno (ver acumulación en los loops de abajo).
+
+    `contexto_confiable` (2026-09-21): el dynamic_context que ya viajó en el
+    mensaje de usuario — FAQs oficiales, cotización de un asesor humano,
+    historial reciente — es información YA VERIFICADA, tan confiable como el
+    resultado de una tool. Sin esto, cualquier precio que el agente repita de
+    una FAQ (ej. 'el domicilio cuesta $12.000', FAQ real ya configurada) se
+    trataba como alucinación porque el turno no llamó ninguna tool. Caso real
+    YAILYN (573173637315, canal 5236, 2026-09-21): preguntó ubicación, horario
+    y costo de domicilio — las 3 FAQs existen y son correctas — el guard
+    disparó por el '$12.000' de la FAQ de envío, forzó un reintento, y el
+    agente respondió SOLO la pregunta pendiente del flujo (domicilio o
+    recogida), sin volver a incluir la ubicación ni el horario que ya tenía
+    bien. Comparación por dígitos (no substring) porque el output puede
+    puntuar el monto distinto a como está en la fuente ($12.000 vs $12,000).
+    """
     output = output or ""
     if not tools_used:
-        return bool(_PRECIO_RE.search(output))
+        montos = _PRECIO_RE.findall(output)
+        if not montos:
+            return False
+        fuente = _PRECIO_RE.findall(tool_results_text) + _PRECIO_RE.findall(contexto_confiable or "")
+        fuente_digitos = {_solo_digitos(m) for m in fuente}
+        return any(_solo_digitos(m) not in fuente_digitos for m in montos)
     codigos = _CODIGO_PRODUCTO_RE.findall(output)
     return any(c not in tool_results_text for c in codigos)
 
@@ -199,6 +229,7 @@ def _run_with_anthropic_client(
     temperature: float,
     session_id: str,
     max_tokens: int = 4096,
+    contexto_confiable: str = "",
 ) -> tuple:
     """
     Loop de agente usando el cliente nativo de Anthropic.
@@ -280,7 +311,7 @@ def _run_with_anthropic_client(
             # entre paréntesis que no aparece en los resultados de tools de
             # este turno → forzar re-búsqueda (1 vez, ver comentario arriba)
             if (not _price_retry_done and anthropic_tools and i < max_iterations - 1
-                    and _precio_o_codigo_no_verificado(output, tools_used, _tool_results_text)):
+                    and _precio_o_codigo_no_verificado(output, tools_used, _tool_results_text, contexto_confiable)):
                 _price_retry_done = True
                 logger.warning(
                     "run_agent anthropic: session=%s precio/código sin verificar en output — "
@@ -389,6 +420,7 @@ def _run_with_openai_client(
     max_iterations: int,
     temperature: float,
     session_id: str,
+    contexto_confiable: str = "",
 ) -> tuple:
     """
     Loop de agente usando el cliente nativo openai.
@@ -439,7 +471,7 @@ def _run_with_openai_client(
             # entre paréntesis que no aparece en los resultados de tools de
             # este turno → forzar re-búsqueda (1 vez, ver comentario arriba)
             if (not _price_retry_done and openai_tools and i < max_iterations - 1
-                    and _precio_o_codigo_no_verificado(output, tools_used, _tool_results_text)):
+                    and _precio_o_codigo_no_verificado(output, tools_used, _tool_results_text, contexto_confiable)):
                 _price_retry_done = True
                 logger.warning(
                     "run_agent: session=%s precio/código sin verificar en output — forzando re-búsqueda",
@@ -931,6 +963,7 @@ def run_agent(
             temperature=temperature,
             session_id=session_id,
             max_tokens=int(config.get("max_tokens") or 4096),
+            contexto_confiable=dynamic_context,
         )
     else:
         output, tools_used, iterations, usage = _run_with_openai_client(
@@ -942,6 +975,7 @@ def run_agent(
             max_iterations=max_iterations,
             temperature=temperature,
             session_id=session_id,
+            contexto_confiable=dynamic_context,
         )
 
     if memory_enabled and session_id and db:

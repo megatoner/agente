@@ -3194,7 +3194,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             for o in orders)
     _PICKING_FIELDS_ENTREGA = [
         "name", "state", "scheduled_date", "date_done",
-        "x_entregado", "x_entregado_at", "carrier_id", "carrier_tracking_ref",
+        "x_estado_logistico", "x_entregado_at", "carrier_id", "carrier_tracking_ref",
     ]
 
     def _carrier_map(picks):
@@ -3249,13 +3249,15 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
     def _fmt_estado_envio(pick, carriers, ruta_info=None):
         """(icono, estado, fecha, lineas_extra) para un stock.picking.
 
-        x_entregado es la confirmación REAL de entrega al cliente (toggle manual
-        del repartidor/ruta, ver jpc_custom stock_picking.py) — state=='done' solo
+        x_estado_logistico == 'entregada' es la confirmación REAL de entrega al
+        cliente (etapa logística de jpc_ruta; el booleano x_entregado se eliminó
+        el 2026-08-27 y pedirlo a Odoo rompía TODA consulta de estado, caso
+        Rituales Universal 2026-09-21) — state=='done' solo
         significa que el picking se validó (mercancía alistada/despachada), NO que
         el cliente ya la recibió. No tratar 'done' como entregado.
 
         ruta_info (dict de _ruta_info, opcional): si el ÚLTIMO intento de ruta
-        quedó 'fallida', x_entregado puede seguir en True por un bug de datos
+        quedó 'fallida', la etapa puede seguir en 'entregada' por un bug de datos
         del toggle manual (11 pickings reales confirmados 2026-08-12) — sin
         este chequeo se muestra "✅ Entregado" arriba y "⚠️ Entrega NO
         completada" en la sub-línea de ruta, un mensaje contradictorio para
@@ -3267,7 +3269,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         es_recoge_tienda = info.get("in_store", False)
         ruta_fallida = bool(ruta_info) and ruta_info.get("estado") == "fallida"
 
-        if pick.get("x_entregado") and not ruta_fallida:
+        if pick.get("x_estado_logistico") == "entregada" and not ruta_fallida:
             icon, estado = "✅", "Entregado"
             fecha = _fmt_date(str(pick.get("x_entregado_at") or pick.get("date_done") or ""))
         elif pick.get("state") == "done":
@@ -4219,7 +4221,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             # que jpc_custom. El detalle de envío/entrega viene del helper
             # compartido con estado_entrega — ahí vive la regla de nunca
             # prometer hora exacta, y la distinción correcta despachado-vs-
-            # entregado (x_entregado, no solo picking state=='done'). Ver
+            # entregado (x_estado_logistico, no solo picking state=='done'). Ver
             # project_entregas_ruta_rastreo.md — "marcamos como entregado" en
             # cuanto se le entrega a la transportadora fue el bug de fondo que
             # esta reescritura corrige (reemplaza el parche puntual del caso

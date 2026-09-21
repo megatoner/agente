@@ -4301,10 +4301,24 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             )
         try:
             # Verificar que la orden existe y no tiene envio ya agregado
-            orders = odoo.read("sale.order", [order_id], ["name", "state", "carrier_id", "amount_total"])
+            orders = odoo.read(
+                "sale.order", [order_id],
+                ["name", "state", "carrier_id", "amount_total", "jwb_flete_modo_code"],
+            )
             if not orders:
                 return f"Orden {order_id} no encontrada."
             order = orders[0]
+            # Si un turno anterior marcó la orden como 'sin_envio' (el cliente
+            # dijo que recogía, ver quitar_envio_orden) y AHORA el cliente pide
+            # domicilio de verdad, esa marca debe soltarse — si no, set_delivery_line
+            # la respeta y deja una nota sin costo en vez de cobrar el flete real.
+            if order.get("jwb_flete_modo_code") in ("sin_envio", "contra_entrega"):
+                odoo.execute_kw("sale.order", "write", [[order_id], {"jwb_flete_modo": False}])
+                logger.info(
+                    "agregar_envio_orden: orden=%s tenía jwb_flete_modo=%s de un turno "
+                    "anterior — se libera para recalcular como domicilio real.",
+                    order_id, order["jwb_flete_modo_code"],
+                )
             if order.get("carrier_id"):
                 carrier_name = order["carrier_id"][1] if isinstance(order["carrier_id"], list) else str(order["carrier_id"])
                 # Si ya tiene envio real (no recogida en tienda), no modificar
@@ -4447,21 +4461,33 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
     @tool
     def quitar_envio_orden(order_id: int) -> str:
-        """Quita el envío de la orden (línea de domicilio + carrier) — usar cuando el
-        cliente dice que va a recoger en tienda DESPUÉS de que ya se agregó envío con
-        agregar_envio_orden (ej. cambió de opinión, o se agregó por error). Si la orden
-        no tiene envío asignado, no hace nada y lo informa (no es un error).
+        """Marcar la orden como RECOGIDA EN TIENDA — llamar SIEMPRE que el cliente
+        confirme que va a recoger, aunque tú no hayas llamado agregar_envio_orden
+        en esta conversación. Es idempotente y segura de llamar de más: si la
+        orden no tenía envío, igual queda marcada para que no se le agregue
+        flete al confirmar.
 
-        Caso real que motivó esta tool: cliente pidió cotización, se le agregó envío
-        sin haber pedido domicilio, el cliente aclaró que iba a recoger en tienda, y
-        el agente no tenía forma de deshacer el envío — tuvo que escalar a un asesor
-        solo para quitar una línea.
+        Por qué es obligatoria y no opcional: la orden puede traer un
+        transportista REAL heredado del perfil del cliente (compras anteriores
+        con domicilio) desde el momento en que se creó la cotización, sin que tú
+        hayas hecho nada. Si el cliente dice que recoge y tú simplemente NO
+        llamas agregar_envio_orden, esa herencia sigue ahí. Peor aún: al
+        confirmar, una red de seguridad de Odoo (pensada para el caso contrario
+        — un pedido que se confirma SIN que nadie haya resuelto el envío) vuelve
+        a calcular el flete del cliente y se lo cobra igual, sin mirar la
+        conversación. Caso real VICTOR ALFONSO PEÑA (573006600037, pedido
+        S59662, 2026-09-21): dijo "Yo los recojo" de forma explícita, el agente
+        no llamó esta tool (creyó que no aplicaba porque nunca había llamado
+        agregar_envio_orden), y al confirmar se le cobraron $19.200 de flete que
+        nunca aceptó — la factura ya quedó emitida así. Esta tool ahora deja la
+        orden marcada como 'sin_envio' además de quitar cualquier línea/carrier
+        existente, así que esa red de seguridad ya no la toca.
         """
         order_id, _rec = _resolver_order_id_cliente(order_id, estados=("draft", "sent"))
         if not order_id:
             return (
                 "❌ Cotización no encontrada o no pertenece al cliente actual — "
-                "NO se quitó envío. Verifica el ORDER_ID (usa el numérico de "
+                "NO se marcó como recogida. Verifica el ORDER_ID (usa el numérico de "
                 "crear_cotizacion/agregar_linea_cotizacion, no los dígitos del nombre)."
             )
         try:
@@ -4469,9 +4495,8 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             if not orders:
                 return f"Orden {order_id} no encontrada."
             order = orders[0]
-            if not order.get("carrier_id"):
-                return f"La orden {order['name']} no tiene envío asignado — no hay nada que quitar."
-            carrier_name = order["carrier_id"][1] if isinstance(order["carrier_id"], list) else str(order["carrier_id"])
+            carrier = order.get("carrier_id")
+            carrier_name = (carrier[1] if isinstance(carrier, list) else str(carrier)) if carrier else None
 
             delivery_lines = odoo.search_read(
                 "sale.order.line",
@@ -4480,13 +4505,25 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             )
             if delivery_lines:
                 odoo.execute_kw("sale.order.line", "unlink", [[l["id"] for l in delivery_lines]])
-            odoo.execute_kw("sale.order", "write", [[order_id], {"carrier_id": False}])
+            vals = {"carrier_id": False}
+            modos = odoo.search_read(
+                "jpc.whatsapp.bot.flete.modo", [["code", "=", "sin_envio"]], ["id"], limit=1)
+            if modos:
+                vals["jwb_flete_modo"] = modos[0]["id"]
+            odoo.execute_kw("sale.order", "write", [[order_id], vals])
 
-            logger.info("quitar_envio_orden: order_id=%s carrier_removido=%s", order_id, carrier_name)
-            return f"✅ Envío quitado de la orden {order['name']} (era: {carrier_name}). Ya no se cobra domicilio."
+            logger.info(
+                "quitar_envio_orden: order_id=%s carrier_removido=%s jwb_flete_modo=sin_envio",
+                order_id, carrier_name,
+            )
+            if carrier_name:
+                return (f"✅ Orden {order['name']} marcada como RECOGIDA EN TIENDA "
+                        f"(tenía envío con: {carrier_name}, ya quitado). Ya no se cobra domicilio.")
+            return (f"✅ Orden {order['name']} marcada como RECOGIDA EN TIENDA. "
+                    "No tenía envío asignado, pero queda protegida para que no se le agregue al confirmar.")
         except Exception as e:
             logger.error("quitar_envio_orden: order_id=%s error=%s", order_id, e)
-            return f"No pude quitar el envío automáticamente: {str(e)}. Solicita a tu asesor que lo gestione."
+            return f"No pude marcar la recogida automáticamente: {str(e)}. Solicita a tu asesor que lo gestione."
 
     @tool
     def verificar_historial_envio(partner_id: int) -> str:

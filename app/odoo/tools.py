@@ -192,6 +192,12 @@ def _msg_repuesto_no_encontrado(busqueda_tipo, referencia, instruccion_fn=None):
     return "\n".join(lines)
 
 
+
+
+AVISO_RESPONDER = (
+    " AHORA ENVÍALE ESTE TEXTO AL CLIENTE, TAL CUAL, EN TU RESPUESTA: esta tool NO le manda nada por su cuenta — solo prepara el texto/link, y si tú no lo copias en tu respuesta el cliente se queda sin nada, sin que nadie se entere."
+)
+
 def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
     """Factory that creates all JPC Odoo tools."""
     odoo = get_odoo_client()
@@ -2812,7 +2818,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             url += f"?access_token={token}"
         return (f"📋 *{o.get('name')}* — {_fmt_currency(o.get('amount_total',0))}\n"
                 f"🔗 {url}\n"
-                f"(enlace para {_m2o(o.get('partner_id'))})")
+                f"(enlace para {_m2o(o.get('partner_id'))})") + AVISO_RESPONDER
 
     # ── FACTURAS ──────────────────────────────────────────────────────────
 
@@ -2907,7 +2913,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         return (f"📄 *{inv.get('name')}*\n"
                 f"Total:{_fmt_currency(inv.get('amount_total',0))} | "
                 f"Pendiente:{_fmt_currency(inv.get('amount_residual',0))}\n"
-                f"🔗 {url}")
+                f"🔗 {url}") + AVISO_RESPONDER
 
     @tool
     def estado_de_cuenta(partner_id: int) -> str:
@@ -2998,7 +3004,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             url += f"?access_token={_elp_token}"
         return (f"💳 *{inv.get('name')}*\n"
                 f"Valor a pagar: {_fmt_currency(inv.get('amount_residual',0))}\n"
-                f"🔗 {url}")
+                f"🔗 {url}") + AVISO_RESPONDER
 
     @tool
     def generar_link_cotizacion(order_id: int) -> str:
@@ -3046,7 +3052,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 f"💳 *{order['name']}*\n"
                 f"Total: {_fmt_currency(order.get('amount_total', 0))}\n"
                 f"🔗 {url}"
-            )
+            ) + AVISO_RESPONDER
         except Exception as e:
             logger.exception("generar_link_cotizacion: error")
             return f"❌ Error generando link: {str(e)[:200]}"
@@ -3741,7 +3747,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
              ("payment_state","in",["not_paid","partial"])],
             ["name","invoice_date_due","amount_residual"], 10)
         if not invs:
-            return "✅ El cliente no tiene saldo pendiente."
+            return "✅ El cliente no tiene saldo pendiente." + AVISO_RESPONDER
 
         invs.sort(key=lambda i: i.get("invoice_date_due") or "")
         hoy = _date.today()
@@ -3770,7 +3776,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         if total_vencido:
             lines.append(f"⚠️ Saldo vencido: *{_fmt_currency(total_vencido)}*")
         lines.append("")
-        return "\n".join(lines + detalle)
+        return "\n".join(lines + detalle) + AVISO_RESPONDER
 
     @tool
     def crear_acuerdo_pago(partner_id: int, plan_descripcion: str) -> str:

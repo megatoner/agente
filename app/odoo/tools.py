@@ -4497,12 +4497,31 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 "crear_cotizacion/agregar_linea_cotizacion, no los dígitos del nombre)."
             )
         try:
-            orders = odoo.read("sale.order", [order_id], ["name", "carrier_id"])
+            orders = odoo.read(
+                "sale.order", [order_id],
+                ["name", "carrier_id", "jwb_flete_modo_code"],
+            )
             if not orders:
                 return f"Orden {order_id} no encontrada."
             order = orders[0]
             carrier = order.get("carrier_id")
             carrier_name = (carrier[1] if isinstance(carrier, list) else str(carrier)) if carrier else None
+
+            # No tocar nada si YA está correctamente en recogida — la orden
+            # puede haber heredado "Recolección en tienda" del propio
+            # histórico del contacto al crearse (jwb_sale_order.create), sin
+            # que esta tool tenga nada que corregir. "Quitar" un envío que
+            # nunca estuvo mal es trabajo de más y ruido innecesario en el
+            # historial de la orden.
+            in_store_ids = odoo.search_read(
+                "delivery.carrier", [["delivery_type", "=", "in_store"]], ["id"], limit=1)
+            in_store_id = in_store_ids[0]["id"] if in_store_ids else None
+            carrier_id_actual = carrier[0] if isinstance(carrier, list) else carrier
+            if (order.get("jwb_flete_modo_code") == "sin_envio"
+                    and in_store_id and carrier_id_actual == in_store_id):
+                return (f"✅ Orden {order['name']} ya estaba en RECOGIDA EN TIENDA "
+                        "— no había nada que quitar. Confírmale al cliente y sigue el flujo."
+                        + AVISO_RESPONDER)
 
             delivery_lines = odoo.search_read(
                 "sale.order.line",
@@ -4511,12 +4530,40 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             )
             if delivery_lines:
                 odoo.execute_kw("sale.order.line", "unlink", [[l["id"] for l in delivery_lines]])
-            vals = {"carrier_id": False}
             modos = odoo.search_read(
                 "jpc.whatsapp.bot.flete.modo", [["code", "=", "sin_envio"]], ["id"], limit=1)
             if modos:
-                vals["jwb_flete_modo"] = modos[0]["id"]
-            odoo.execute_kw("sale.order", "write", [[order_id], vals])
+                # jwb_flete_modo se fija ANTES de set_delivery_line: ese método
+                # (jwb_sale_order.py) solo RE-RESUELVE el modo si el campo viene
+                # vacío ("if not modo: modo = resolver(...)") — con esto ya
+                # puesto, entra directo a la rama sin_precio_orders y respeta
+                # 'sin_envio' en vez de recalcularlo desde el contacto/bot.
+                odoo.execute_kw("sale.order", "write", [[order_id], {"jwb_flete_modo": modos[0]["id"]}])
+            else:
+                odoo.execute_kw("sale.order", "write", [[order_id], {"carrier_id": False}])
+            # Poner el Método de Envío en "Recolección en tienda" AHORA — no
+            # dejarlo en blanco esperando que la red de seguridad de
+            # action_confirm lo resuelva al confirmar. Esa red de seguridad
+            # RE-CALCULA el modo desde el contacto/bot (jwb_resolver_flete_modo
+            # no mira order.jwb_flete_modo) y puede no encontrar transportista
+            # sugerido y dejar el pedido sin Método de Envío. Caso real
+            # INNOVACION & SISTEMAS IT S.A.S (573245780633, pedido S60722,
+            # 2026-09-29): jwb_flete_modo quedó en 'sin_envio' correctamente,
+            # pero carrier_id nunca se llenó — el pedido se confirmó sin
+            # Método de Envío. jwb_aplicar_envio_orden ya sabe validar el
+            # carrier contra la dirección y llamar set_delivery_line con un
+            # recordset real (algo que esta tool, por XML-RPC, no puede hacer
+            # directo) — estaba huérfana (CLAUDE.md), ahora tiene un uso real.
+            if in_store_id:
+                try:
+                    odoo.execute_kw(
+                        "jpc.whatsapp.bot.config", "jwb_aplicar_envio_orden",
+                        [[], order_id, in_store_id],
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "quitar_envio_orden: order_id=%s no se pudo fijar el "
+                        "Método de Envío a recolección: %s", order_id, e)
 
             logger.info(
                 "quitar_envio_orden: order_id=%s carrier_removido=%s jwb_flete_modo=sin_envio",

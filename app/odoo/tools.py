@@ -4516,11 +4516,21 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 "quitar_envio_orden: order_id=%s carrier_removido=%s jwb_flete_modo=sin_envio",
                 order_id, carrier_name,
             )
+            aviso = (
+                " AHORA RESPÓNDELE AL CLIENTE EN ESTE MISMO MENSAJE: confirma que "
+                "quedó para recoger en tienda y sigue el flujo (pregúntale cómo prefiere "
+                "pagar si aún no lo sabes, o continúa con lo que sigue). NUNCA dejes esta "
+                "tool como tu única acción del turno — a diferencia de escalar_a_asesor o "
+                "enviar_tarjeta_producto, esta tool NO le dice nada al cliente por su cuenta; "
+                "si no escribes tú, el cliente se queda sin respuesta y esto escala solo."
+            )
             if carrier_name:
                 return (f"✅ Orden {order['name']} marcada como RECOGIDA EN TIENDA "
-                        f"(tenía envío con: {carrier_name}, ya quitado). Ya no se cobra domicilio.")
+                        f"(tenía envío con: {carrier_name}, ya quitado). Ya no se cobra domicilio."
+                        + aviso)
             return (f"✅ Orden {order['name']} marcada como RECOGIDA EN TIENDA. "
-                    "No tenía envío asignado, pero queda protegida para que no se le agregue al confirmar.")
+                    "No tenía envío asignado, pero queda protegida para que no se le agregue al confirmar."
+                    + aviso)
         except Exception as e:
             logger.error("quitar_envio_orden: order_id=%s error=%s", order_id, e)
             return f"No pude marcar la recogida automáticamente: {str(e)}. Solicita a tu asesor que lo gestione."

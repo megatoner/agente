@@ -1650,9 +1650,24 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
         ref = referencia.strip()
         # NOTA: 'tambor' y 'drum' NO van aqui \u2014 son tipos de repuesto, no ruido.
+        # Colores (salvo 'negro', que ya estaba) agregados 2026-10-01: Fase 3
+        # (_buscar_por_sku_oem/_buscar_por_atributo_impresora) hace ilike con la
+        # CADENA COMPLETA contra el valor del atributo (ej. 'CC533A/CE413A/CF383A'),
+        # asi que un color sin limpiar ('magenta CE413A') nunca hace match aunque
+        # el codigo solo si lo haga. Caso real IST INGENIERIA (573165803563,
+        # 2026-09-30): pidio toner magenta para la M475dw, MIA ofrecio amarillo y
+        # cian (sus terminos exactos 'CE412A'/'CE411A' si estaban bien vinculados
+        # en Fase 1 y nunca llegaban a Fase 3), pero el termino exacto 'CE413A'
+        # (magenta) estaba SIN vincular a ningun producto (dato roto, corregido
+        # aparte) y caia a Fase 3, donde 'magenta CE413A' ya no encontraba nada.
+        # Limpiar el color de entrada deja Fase 3 funcionando como red de
+        # seguridad real pase lo que pase con el catalogo de terminos exactos,
+        # igual que ya protegia a 'negro'.
         _MODIFIERS = _re.compile(
             r'\b(toner|t[o\u00f3]ner|cartucho|tinta|ink|cartridge|'
-            r'sin|con|chip|negro|color|original|compatible|nuevo|nueva|'
+            r'sin|con|chip|negro|negra|black|cian|cyan|azul|magenta|'
+            r'amarillo|amarilla|yellow|rojo|red|verde|green|gris|gray|grey|'
+            r'tricolor|color|original|compatible|nuevo|nueva|'
             r'para|de|del|la|el|los|las|y|o|a|en|un|una)\b',
             _re.IGNORECASE,
         )
@@ -4714,10 +4729,16 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
         # Limpiar modificadores genericos del mensaje
         # NOTA: 'tambor' y 'drum' NO van aqui \u2014 son tipos de repuesto, no ruido.
+        # Colores (salvo 'negro', que ya estaba) agregados 2026-10-01 — mismo
+        # motivo que en _buscar_producto_core: un color sin limpiar combinado
+        # con el codigo (ej. 'magenta CE413A') puede tumbar el match por
+        # atributo/SKU en Fase 3 aunque el codigo solo si matchee.
         _MOD = _re.compile(
             r'\b(toner|t[o\u00f3]ner|cartucho|tinta|ink|cartridge|'
             r'necesito|quiero|cotizame|facturame|pide|dame|busco|'
-            r'sin|con|chip|negro|color|original|compatible|nuevo|nueva|'
+            r'sin|con|chip|negro|negra|black|cian|cyan|azul|magenta|'
+            r'amarillo|amarilla|yellow|rojo|red|verde|green|gris|gray|grey|'
+            r'tricolor|color|original|compatible|nuevo|nueva|'
             r'para|de|del|la|el|los|las|y|o|a|en|un|una|por|favor)\b',
             _re.IGNORECASE,
         )

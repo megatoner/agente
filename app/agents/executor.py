@@ -143,20 +143,28 @@ REGLAS:
 7. Después de ejecutar una acción, confirma el resultado al usuario.
 """
 
-# Modelos que solo aceptan temperature=1
-_TEMP_ONE_ONLY = ("kimi-k2",)
-
-
 def _model_name(llm_model: str) -> str:
     """Extrae solo el nombre del modelo de 'provider/model'."""
     return llm_model.split("/", 1)[-1] if "/" in llm_model else llm_model
 
 
-def _get_temperature(llm_model: str, config_temp: float) -> Optional[float]:
-    """Retorna la temperatura adecuada para el modelo."""
-    name = _model_name(llm_model).lower()
-    if any(name.startswith(p) for p in _TEMP_ONE_ONLY):
-        return 1
+def _get_temperature(llm_model: str, config_temp: Optional[float]) -> Optional[float]:
+    """Retorna la temperatura a usar para este modelo.
+
+    Ya NO decide por nombre de modelo (antes: tupla _TEMP_ONE_ONLY hardcodeada
+    aquí, "modelos que solo aceptan temperature=1" — cada modelo nuevo con una
+    restricción distinta exigía tocar este archivo y reiniciar el servicio).
+    Odoo (jpc.ai.model.supports_temperature / temperature_fixed, configurable
+    desde Ajustes IA → Modelos) ya resolvió el valor final — o None si el
+    modelo RECHAZA el parámetro por completo — antes de mandarlo en
+    config['temperature']. Esta función solo queda como punto único de
+    lectura, por si un día hace falta volver a intervenir aquí.
+
+    Caso real 2026-10-02: claude-sonnet-5-5 devuelve 400 Bad Request
+    ("temperature is deprecated for this model") con CUALQUIER valor — el
+    bot de WhatsApp (agente 26) estuvo caído 4+ horas porque esto se mandaba
+    siempre. Config_temp llega en None para ese caso ahora.
+    """
     return config_temp
 
 
@@ -230,10 +238,17 @@ def _run_with_anthropic_client(
     session_id: str,
     max_tokens: int = 4096,
     contexto_confiable: str = "",
+    supports_prompt_caching: bool = True,
 ) -> tuple:
     """
     Loop de agente usando el cliente nativo de Anthropic.
     Retorna (output_text, tools_used, iterations, usage).
+
+    supports_prompt_caching=False (resuelto en Odoo vía
+    jpc.ai.model.supports_prompt_caching, ver jpc_ai_agents/CLAUDE.md): no se
+    manda 'cache_control' a un modelo que no lo soporte — mandarlo a ciegas
+    es el mismo tipo de error que tumbó el bot con 'temperature' el
+    2026-10-02 (ver _TEMP_ONE_ONLY / resolución de temperature arriba).
     """
     client = llm_obj._client  # anthropic.Anthropic() instance
     tools_used = []
@@ -264,15 +279,18 @@ def _run_with_anthropic_client(
     # estables entre llamadas (el contexto dinámico viaja en el user message).
     _CACHE_1H = {"type": "ephemeral", "ttl": "1h"}
     if system_content:
-        call_kwargs["system"] = [
-            {"type": "text", "text": system_content, "cache_control": dict(_CACHE_1H)}
-        ]
+        if supports_prompt_caching:
+            call_kwargs["system"] = [
+                {"type": "text", "text": system_content, "cache_control": dict(_CACHE_1H)}
+            ]
+        else:
+            call_kwargs["system"] = system_content
     if temperature is not None:
         call_kwargs["temperature"] = temperature
     if anthropic_tools:
-        # Marcar el ultimo tool para activar cache del bloque completo de tools
         cached_tools = [dict(t) for t in anthropic_tools]
-        if cached_tools:
+        if supports_prompt_caching and cached_tools:
+            # Marcar el ultimo tool para activar cache del bloque completo de tools
             cached_tools[-1] = dict(cached_tools[-1])
             cached_tools[-1]["cache_control"] = dict(_CACHE_1H)
         call_kwargs["tools"] = cached_tools
@@ -398,7 +416,7 @@ def _run_with_anthropic_client(
                 for _b in _c:
                     if isinstance(_b, dict):
                         _b.pop("cache_control", None)
-        if tool_results:
+        if supports_prompt_caching and tool_results:
             tool_results[-1]["cache_control"] = {"type": "ephemeral"}
 
         # Agregar resultados de tools como mensaje de usuario
@@ -877,6 +895,10 @@ def run_agent(
         user_text = message
 
     temperature = _get_temperature(llm_model, config.get("temperature", 0.2))
+    # Resuelto en Odoo (jpc.ai.model.supports_prompt_caching, ver
+    # jpc_ai_agents/CLAUDE.md) — default True para no cambiar el
+    # comportamiento de ningún caller que todavía no mande esta clave.
+    supports_prompt_caching = config.get("supports_prompt_caching", True)
     # Cap de iteraciones: un run sano termina en <= 8; más es señal de loop.
     max_iterations = min(int(config.get("max_iterations") or 8), 8)
     memory_enabled = config.get("memory_enabled", True)
@@ -964,6 +986,7 @@ def run_agent(
             session_id=session_id,
             max_tokens=int(config.get("max_tokens") or 4096),
             contexto_confiable=dynamic_context,
+            supports_prompt_caching=supports_prompt_caching,
         )
     else:
         output, tools_used, iterations, usage = _run_with_openai_client(

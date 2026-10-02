@@ -27,8 +27,16 @@ class AgentConfig(BaseModel):
     system_prompt: Optional[str] = "You are a helpful assistant."
     tools: List[str] = Field(default_factory=list, description="List of tool names to enable")
     memory_enabled: bool = True
-    temperature: float = 0.2
+    # Optional, no float a secas: Odoo (jpc.ai.model.supports_temperature,
+    # ver jpc_ai_agents/CLAUDE.md) manda explícitamente None para modelos que
+    # RECHAZAN el parámetro — con "float" a secas esto daba 422 Unprocessable
+    # Entity (regresión real 2026-10-02: tumbó el agente 26 en cuanto se
+    # volvió a activar claude-sonnet-5-5, el mismo día que se agregó esto).
+    temperature: Optional[float] = 0.2
     max_iterations: int = 15
+    # Igual que arriba — ver jpc_ai_models.supports_prompt_caching. Default
+    # True: no cambia el comportamiento de ningún caller que no lo mande.
+    supports_prompt_caching: bool = True
 
 
 class RunRequest(BaseModel):

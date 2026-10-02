@@ -64,6 +64,7 @@ def run_agent_endpoint(
                 "temperature": req.agent_config.temperature,
                 "max_iterations": req.agent_config.max_iterations,
                 "memory_enabled": req.agent_config.memory_enabled,
+                "supports_prompt_caching": req.agent_config.supports_prompt_caching,
             },
             odoo_context=req.odoo_context,
             image_content=req.image_content,

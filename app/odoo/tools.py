@@ -3052,6 +3052,10 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 return f"❌ Cotización ID:{order_id} no encontrada."
             order = orders[0]
             token = order.get("access_token") or ""
+            _hay_envio = bool(odoo.search_read(
+                "sale.order.line",
+                [("order_id", "=", order_id), ("is_delivery", "=", True)],
+                ["id"], limit=1))
             # Si _portal_ensure_token no genero el token, escribirlo directamente
             if not token:
                 import uuid as _uuid
@@ -3067,7 +3071,10 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 f"💳 *{order['name']}*\n"
                 f"Total: {_fmt_currency(order.get('amount_total', 0))}\n"
                 f"🔗 {url}"
-            ) + AVISO_RESPONDER
+            ) + ("" if _hay_envio else
+                 "\n\n⚠️ OBLIGATORIO en tu mensaje al cliente: este valor NO incluye "
+                 "el envío. Dile que si lo quiere a domicilio, te lo indique ANTES de "
+                 "pagar. No agregues envío si el cliente no lo pidió.") + AVISO_RESPONDER
         except Exception as e:
             logger.exception("generar_link_cotizacion: error")
             return f"❌ Error generando link: {str(e)[:200]}"

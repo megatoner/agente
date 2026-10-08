@@ -2828,12 +2828,20 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             return f"Cotización {order_id} no encontrada."
         o = recs[0]
         token = o.get("access_token") or ""
+        _hay_envio = bool(odoo.search_read(
+            "sale.order.line",
+            [("order_id", "=", order_id), ("is_delivery", "=", True)],
+            ["id"], limit=1))
         url = f"{_base_url()}/my/orders/{order_id}"
         if token:
             url += f"?access_token={token}"
         return (f"📋 *{o.get('name')}* — {_fmt_currency(o.get('amount_total',0))}\n"
                 f"🔗 {url}\n"
-                f"(enlace para {_m2o(o.get('partner_id'))})") + AVISO_RESPONDER
+                f"(enlace para {_m2o(o.get('partner_id'))})") + (
+                    "" if _hay_envio else
+                    "\n\n⚠️ OBLIGATORIO en tu mensaje al cliente: este valor NO incluye "
+                    "el envío. Dile que si lo quiere a domicilio, te lo indique ANTES de "
+                    "pagar. No agregues envío si el cliente no lo pidió.") + AVISO_RESPONDER
 
     # ── FACTURAS ──────────────────────────────────────────────────────────
 

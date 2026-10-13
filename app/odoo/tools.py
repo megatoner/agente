@@ -3649,7 +3649,12 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
         return (
             f"✅ Factura {result['factura']} enviada a {result['email']} "
-            f"con el PDF y el XML/CUDE de la DIAN."
+            f"con el PDF y el XML/CUDE de la DIAN.\n"
+            "⚠️ SIGUIENTE PASO: dile al cliente que ya la enviaste a ese correo y "
+            "PREGÚNTALE si le llegó (que revise también spam). NO escales a un asesor "
+            "por esto: solo si el cliente responde que NO le llegó o que el correo es "
+            "otro, corrige el correo y reenvía; escala únicamente si tras reenviar "
+            "sigue sin llegarle."
         )
 
     # ── TICKETS / SOPORTE ─────────────────────────────────────────────────

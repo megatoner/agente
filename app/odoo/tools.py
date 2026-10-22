@@ -198,6 +198,18 @@ AVISO_RESPONDER = (
     " AHORA ENVÍALE ESTE TEXTO AL CLIENTE, TAL CUAL, EN TU RESPUESTA: esta tool NO le manda nada por su cuenta — solo prepara el texto/link, y si tú no lo copias en tu respuesta el cliente se queda sin nada, sin que nadie se entere."
 )
 
+# Se agrega a toda tool que devuelve el link del portal de una FACTURA. Esa
+# página ya trae el botón para descargar el PDF; sin esta instrucción, si el
+# cliente pedía "el PDF" después de recibir el link, el agente no sabía que el
+# link lo cubre y escalaba a un asesor sin necesidad.
+AVISO_PDF_DESDE_LINK = (
+    "\n\n📎 SI EL CLIENTE PIDE EL PDF / LA COPIA DESPUÉS DE RECIBIR ESTE LINK: "
+    "dile que abra el enlace y descargue el PDF desde el botón de descarga "
+    "(\"Descargar\") de esa página. NO escales a un asesor por esto. Escala "
+    "solo si responde que el link no abre o que no ve el botón."
+)
+
+
 def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
     """Factory that creates all JPC Odoo tools."""
     odoo = get_odoo_client()
@@ -2936,7 +2948,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         return (f"📄 *{inv.get('name')}*\n"
                 f"Total:{_fmt_currency(inv.get('amount_total',0))} | "
                 f"Pendiente:{_fmt_currency(inv.get('amount_residual',0))}\n"
-                f"🔗 {url}") + AVISO_RESPONDER
+                f"🔗 {url}") + AVISO_RESPONDER + AVISO_PDF_DESDE_LINK
 
     @tool
     def estado_de_cuenta(partner_id: int) -> str:
@@ -3003,7 +3015,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         if _glp_token:
             url += f"?access_token={_glp_token}"
         return (f"🔗 Enlace de pago — {inv.get('name')}\n"
-                f"Saldo: {_fmt_currency(inv.get('amount_residual',0))}\n{url}")
+                f"Saldo: {_fmt_currency(inv.get('amount_residual',0))}\n{url}") + AVISO_PDF_DESDE_LINK
 
     @tool
     def enviar_link_pago_whatsapp(invoice_id: int) -> str:
@@ -3027,7 +3039,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             url += f"?access_token={_elp_token}"
         return (f"💳 *{inv.get('name')}*\n"
                 f"Valor a pagar: {_fmt_currency(inv.get('amount_residual',0))}\n"
-                f"🔗 {url}") + AVISO_RESPONDER
+                f"🔗 {url}") + AVISO_RESPONDER + AVISO_PDF_DESDE_LINK
 
     @tool
     def generar_link_cotizacion(order_id: int) -> str:

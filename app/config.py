@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     odoo_db: str = "odoo"
     odoo_username: str = "admin"
     odoo_api_key: str = ""
+
+    # Agente de Caja: usuario propio (solo grupo Contador de Caja), no la cuenta global
+    caja_odoo_username: str = ""
+    caja_odoo_api_key: str = ""
     
     # LLM Providers
     openai_api_key: str = ""

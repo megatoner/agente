@@ -2,6 +2,7 @@
 from langchain.tools import tool
 from typing import List, Dict, Any, Optional
 from app.odoo.client import OdooClient, get_odoo_client
+from app.odoo.caja_tools import create_caja_tools
 import json
 import logging
 import re
@@ -5095,6 +5096,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         quitar_envio_orden,
         verificar_historial_envio,
         buscar_referencias_mensaje,
+        *create_caja_tools(),
     ]
 
 

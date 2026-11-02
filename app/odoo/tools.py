@@ -249,6 +249,17 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
     _price_fallback = str((odoo_context or {}).get("price_fallback") or "list_price").strip()
     # ID del bot de WhatsApp (para aviso de búsqueda similar)
     _bot_id = int((odoo_context or {}).get("bot_id") or 0)
+    # Catálogo restringido por categoría (2026-11-01, bot Blizka): si el bot trae
+    # categorías, SOLO se buscan/cotizan productos dentro de ellas (child_of). Vacío =
+    # sin restricción (Megatoner: comportamiento idéntico al de siempre).
+    _bot_categ_ids = [int(c) for c in ((odoo_context or {}).get("bot_categ_ids") or []) if c]
+    # URL base de los enlaces de producto de este bot (default: Megatoner).
+    _bot_site_url = (
+        str((odoo_context or {}).get("bot_site_url") or "").strip().rstrip("/")
+        or "https://www.megatoner.co"
+    )
+    # El bot solo responde con las FAQs propias (no las globales de Megatoner).
+    _faq_solo_propias = bool((odoo_context or {}).get("faq_solo_propias"))
 
     _commercial_cache = {}
 
@@ -853,7 +864,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 domain_bot.append(("bot_id", "=", bot_id))
             faqs = odoo.search_read("jpc.whatsapp.bot.faq", domain_bot, campos, limit=3)
             # Si no encontró del bot específico, buscar globales
-            if not faqs and bot_id:
+            if not faqs and bot_id and not _faq_solo_propias:
                 faqs = odoo.search_read(
                     "jpc.whatsapp.bot.faq",
                     [("active", "=", True), ("pregunta", "ilike", tema), ("bot_id", "=", False)],
@@ -1382,7 +1393,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             )
             pos_name_map = {t["id"]: (t.get("jpc_pos_name") or t.get("name") or "") for t in tmpls}
             url_map = {
-                t["id"]: ("https://www.megatoner.co" + t["website_url"])
+                t["id"]: (_bot_site_url + t["website_url"])
                 if t.get("website_url") else ""
                 for t in tmpls
             }
@@ -1652,6 +1663,227 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                      if any(_tok_in_name(t, c['name']) for t in weak)][:3]
         return [], parciales
 
+    # ── Catálogo restringido por categoría (bot Blizka, 2026-11-01) ────────────
+    # Solo se activa si el bot trae `bot_categ_ids`. Los productos de hogar no
+    # tienen términos de búsqueda de impresoras (jpc.product.search.term), así que
+    # el motor de Fases 1-3 no los encuentra: se busca por nombre/categoría dentro
+    # de las categorías permitidas. Las MEDIDAS son variantes con precio propio, por
+    # eso se listan todas en vez de un único "representante".
+    _STOP_CATALOGO = {
+        "necesito", "quiero", "quisiera", "cotizame", "cotizar", "cotizacion", "precio",
+        "precios", "valor", "cuanto", "cuesta", "vale", "hola", "buenas", "buenos", "dias",
+        "tardes", "noches", "tienen", "tiene", "hay", "para", "con", "sin", "una", "uno",
+        "unos", "unas", "por", "favor", "que", "los", "las", "del", "mas", "mis", "como",
+        "unidad", "unidades", "medida", "medidas", "comprar", "compra", "pedido", "favor",
+        "gracias", "info", "informacion", "ver", "muestrame", "mandame", "enviame",
+    }
+
+    def _norm_txt(s):
+        import unicodedata
+        s = unicodedata.normalize("NFD", (s or "").lower())
+        return "".join(c for c in s if unicodedata.category(c) != "Mn")
+
+    def _catalogo_categorias_buscar(texto):
+        """IDs de product.template (dentro de las categorías del bot) que mejor
+        coinciden con el texto. Coincidencia por palabras sobre nombre + categoría,
+        sin acentos y con plural simple. Devuelve los de mayor puntaje (máx. 8)."""
+        import re as _r
+        toks = []
+        for w in _r.findall(r"[a-z0-9]+", _norm_txt(texto)):
+            if len(w) < 3 or w in _STOP_CATALOGO or w.isdigit():
+                continue  # los números son medidas/cantidades, no identifican producto
+            if w.endswith("es") and len(w) > 5:
+                w = w[:-2]
+            elif w.endswith("s") and len(w) > 3:
+                w = w[:-1]
+            toks.append(w)
+        if not toks:
+            return []
+        rows = odoo.search_read(
+            "product.template",
+            [("categ_id", "child_of", _bot_categ_ids), ("active", "=", True),
+             ("is_published", "=", True)],
+            ["id", "name", "jpc_pos_name", "categ_id"],
+            limit=300,
+        )
+        scored = []
+        for r in rows:
+            categ = r["categ_id"][1] if isinstance(r.get("categ_id"), (list, tuple)) else ""
+            hay = _norm_txt(" ".join([r.get("name") or "", r.get("jpc_pos_name") or "", categ]))
+            hits = sum(1 for t in toks if t in hay)
+            if hits:
+                scored.append((hits, r["id"]))
+        if not scored:
+            return []
+        best = max(h for h, _ in scored)
+        return [i for h, i in sorted(scored, key=lambda x: (-x[0], x[1])) if h == best][:8]
+
+    def _producto_permitido(product_id):
+        """True si el producto está en las categorías del bot (o el bot no restringe).
+        Falla CERRADO: ante un error de lectura no se deja pasar."""
+        if not _bot_categ_ids:
+            return True
+        try:
+            return bool(odoo.search_read(
+                "product.product",
+                [("id", "=", int(product_id)), ("categ_id", "child_of", _bot_categ_ids)],
+                ["id"], limit=1,
+            ))
+        except Exception as e:
+            logger.warning("_producto_permitido(%s): %s", product_id, e)
+            return False
+
+    def _variantes_catalogo(tmpl_ids):
+        """{tmpl_id: [{id, medida, precio}]} con TODAS las variantes publicadas que
+        tienen precio real (>0) con la lista del bot. 'medida' sale del paréntesis
+        final del display_name, ej. '(140x190)'."""
+        out = {}
+        if not tmpl_ids:
+            return out
+        vs = odoo.search_read(
+            "product.product",
+            [("product_tmpl_id", "in", tmpl_ids), ("active", "=", True), ("is_published", "=", True)],
+            ["id", "display_name", "product_tmpl_id", "qty_available"], limit=200,
+            **({"context": _wh_ctx} if _warehouse_id else {}),
+        )
+        for v in vs:
+            tid = v["product_tmpl_id"][0] if isinstance(v["product_tmpl_id"], (list, tuple)) else v["product_tmpl_id"]
+            dn = v.get("display_name") or ""
+            medida = dn[dn.rfind("(") + 1:-1].strip() if dn.endswith(")") and "(" in dn else ""
+            precio = _get_product_price_for_client(v["id"], _partner_id) if _partner_id else None
+            if precio is None or precio <= 0:
+                continue
+            out.setdefault(tid, []).append({
+                "id": v["id"], "medida": medida, "precio": precio,
+                "stock": v.get("qty_available") or 0,
+            })
+        for tid in out:
+            out[tid].sort(key=lambda x: x["medida"])
+        return out
+
+    def _formato_catalogo(ref, prods, medida_pedida=None):
+        """Texto para el agente con producto → variantes (ID, medida, precio)."""
+        tmpl_ids = []
+        for p in prods:
+            t = p.get("product_tmpl_id")
+            tmpl_ids.append(int(t[0] if isinstance(t, (list, tuple)) else t))
+        variantes = _variantes_catalogo(tmpl_ids)
+        lines = [f"Encontré {len(prods)} producto(s) de Blizka para '{ref}'."]
+        for p in prods:
+            t = p.get("product_tmpl_id")
+            tid = int(t[0] if isinstance(t, (list, tuple)) else t)
+            vs = variantes.get(tid) or []
+            if not vs:
+                continue
+            cab = f"NOMBRE_EXACTO:{p.get('name', '')}"
+            if p.get("product_url"):
+                cab += f" | URL_PRODUCTO:{p['product_url']}"
+            lines.append("  - " + cab)
+            for v in vs:
+                med = f"Medida:{v['medida']} | " if v["medida"] else ""
+                if v["stock"] > 0:
+                    lines.append(
+                        f"      • ID:{v['id']} | {med}PRECIO_x1:{_fmt_currency(v['precio'])} "
+                        f"| Stock:{v['stock']:.0f}"
+                    )
+                else:
+                    lines.append(f"      • ID:{v['id']} | {med}❌ AGOTADO (no cotizar)")
+        lines.append("")
+        lines.append("⚠️ REGLAS OBLIGATORIAS PARA TU RESPUESTA AL CLIENTE:")
+        lines.append("1. Usa EXACTAMENTE el NOMBRE_EXACTO. No cambies ni abrevies el nombre.")
+        lines.append("2. El PRECIO depende de la MEDIDA (cada medida es un ID distinto). Si el "
+                     "cliente no dijo la medida, pregúntala (o muestra el rango de precios) ANTES de "
+                     "cotizar; nunca asumas una medida.")
+        lines.append("3. Al cotizar usa el ID de la variante con la medida que eligió el cliente.")
+        lines.append("4. Si das un enlace, usa EXACTAMENTE la URL_PRODUCTO. Nunca armes URLs.")
+        lines.append("5. No inventes medidas, materiales ni garantías: solo lo que digan la ficha o las FAQs.")
+        return "\n".join(lines)
+
+    _NUM_PALABRAS = {"un": 1, "una": 1, "uno": 1, "dos": 2, "tres": 3, "cuatro": 4,
+                     "cinco": 5, "seis": 6}
+
+    def _cantidad_en_texto(seg):
+        """Cantidad explícita en un segmento ('2 unidades', 'dos', '3 almohadas'),
+        o None. Un número suelto de 2-3 dígitos NO es cantidad: es una medida."""
+        import re as _r
+        low = _norm_txt(seg)
+        m = _r.search(r"(\d{1,2})\s*(?:u\b|uds?\b|und\w*|unidad\w*)", low)
+        if m:
+            return int(m.group(1))
+        m = _r.search(r"\b(un|una|uno|dos|tres|cuatro|cinco|seis)\b", low)
+        if m:
+            return _NUM_PALABRAS[m.group(1)]
+        # Número de 1-2 dígitos seguido de una palabra ("quiero 2 colchón"); el
+        # (?!\d) evita tomar "14" de "140" y el (?!\s*x) evita "100 x 190".
+        m = _r.search(r"(?<![\d.,])(\d{1,2})(?![\d.,])(?!\s*[x×*])\s+[a-z]", low)
+        if m and int(m.group(1)) < 20:
+            return int(m.group(1))
+        return None
+
+    def _medida_en_texto(seg):
+        """Ancho/medida pedida: '140x190' → '140x190'; un número 80-220 suelto → '140'."""
+        import re as _r
+        low = _norm_txt(seg)
+        m = _r.search(r"(\d{2,3})\s*[x×*]\s*(\d{3})", low)
+        if m:
+            return f"{m.group(1)}x{m.group(2)}"
+        for n in _r.findall(r"(?<!\d)(\d{2,3})(?!\d)", low):
+            if 80 <= int(n) <= 220:
+                return n
+        return None
+
+    def _referencias_catalogo(mensaje):
+        """Equivalente de buscar_referencias_mensaje para bots con catálogo
+        restringido: una línea PRODUCT_ID por variante (medida), con stock."""
+        import re as _r
+        segs = [s.strip() for s in _r.split(
+            r"[,;+\n]|\by\s+(?=\d|un\b|una\b|dos\b|tres\b)", mensaje, flags=_r.I) if s and s.strip()]
+        lines = []
+        for seg in segs or [mensaje]:
+            prods = _buscar_producto_core(seg)[0]
+            if not prods:
+                lines.append(
+                    f"[PRODUCTO_NO_ENCONTRADO: {seg}] No está en el catálogo de este bot. "
+                    "Pregúntale al cliente qué tipo de producto busca (colchón, almohada, cama, "
+                    "sofá) y la medida. NO escales por esto."
+                )
+                continue
+            qty = _cantidad_en_texto(seg)
+            medida = _medida_en_texto(seg)
+            tmpl_ids = []
+            for p in prods:
+                t = p.get("product_tmpl_id")
+                tmpl_ids.append(int(t[0] if isinstance(t, (list, tuple)) else t))
+            variantes = _variantes_catalogo(tmpl_ids)
+            varios = len(prods) > 1
+            for p in prods:
+                t = p.get("product_tmpl_id")
+                tid = int(t[0] if isinstance(t, (list, tuple)) else t)
+                vs = variantes.get(tid) or []
+                if medida:
+                    elegidas = [v for v in vs if v["medida"].split("x")[0] == medida.split("x")[0]
+                                and (("x" not in medida) or v["medida"] == medida)]
+                    vs = elegidas or vs
+                    medida_ok = bool(elegidas)
+                else:
+                    medida_ok = len(vs) == 1
+                for v in vs:
+                    nombre = p.get("name", "") + (f" ({v['medida']})" if v["medida"] else "")
+                    if v["stock"] <= 0:
+                        estado = "❌ AGOTADO (no cotizar)"
+                    else:
+                        estado = "✅" if (medida_ok and not varios) else "⚠️ confirmar producto/medida"
+                    q = qty if qty is not None else 1
+                    lines.append(
+                        f"PRODUCT_ID:{v['id']} | {nombre} | Qty:{q} | {estado} | "
+                        f"Stock:{v['stock']:.0f} | PRECIO_x1:{_fmt_currency(v['precio'])}"
+                    )
+            if qty is None:
+                lines.append(f"(No se detectó cantidad para '{seg}': asume 1 solo si el cliente "
+                             "no la dijo en ningún mensaje; si no, pregúntala.)")
+        lines.append("Cada medida tiene su propio ID y precio: cotiza SOLO la que el cliente eligió.")
+        return "\n".join(lines)
+
     def _buscar_producto_core(referencia: str):
         """Busca productos y retorna (prods, ids, ref_display, busqueda_tipo).
 
@@ -1701,7 +1933,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             )
             pos_name_map = {t["id"]: (t["jpc_pos_name"] or t["name"]) for t in tmpls}
             url_map = {
-                t["id"]: ("https://www.megatoner.co" + t["website_url"])
+                t["id"]: (_bot_site_url + t["website_url"])
                 if t.get("website_url") else ""
                 for t in tmpls
             }
@@ -1785,6 +2017,23 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                     rep["variantes_resumen"] = []
                 result.append(rep)
             return result[:20]
+
+        # Bot con catálogo restringido por categoría (Blizka): búsqueda propia por
+        # nombre/categoría y SALIDA TEMPRANA — las fases de abajo son de impresoras.
+        if _bot_categ_ids:
+            _t_ids = _catalogo_categorias_buscar(referencia)
+            # El stock SÍ se respeta (por variante/medida, en el almacén del bot):
+            # _tmpl_to_prods ya marca en_stock según qty_available con _wh_ctx.
+            _prods_c = _tmpl_to_prods(_t_ids) if _t_ids else []
+            if _prods_c and _price_fallback == 'hide':
+                _prods_c = [p for p in _prods_c if _tiene_precio_canal(p["id"])]
+            if _prods_c and _partner_id:
+                _prods_c = [p for p in _prods_c if _precio_es_vendible(p["id"])]
+                if not _prods_c:
+                    return [], [], ref, 'sin_precio_canal'
+            if not _prods_c:
+                return [], [], ref, 'ninguna'
+            return _prods_c, [p["id"] for p in _prods_c], ref, 'exacta'
 
         # Familias de impresora → línea de consumible. Una DeskJet nunca usa
         # tóner y una LaserJet nunca usa botella de tinta, así que la palabra de
@@ -2294,6 +2543,13 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         textualmente.
         """
         prods, ids, ref, busqueda_tipo = _buscar_producto_core(referencia)
+        if not prods and _bot_categ_ids and busqueda_tipo == 'ninguna':
+            return (
+                f"No encontré '{referencia}' en el catálogo de este bot. "
+                "Dile al cliente que no lo encuentras con ese nombre y pregúntale qué "
+                "tipo de producto busca (colchón, almohada, cama, sofá) y la medida. "
+                "NO escales por esto y NO ofrezcas productos de otras líneas."
+            )
         if not prods:
             if busqueda_tipo == 'sin_precio_canal':
                 return (
@@ -2337,6 +2593,8 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 )
             )
         logger.info("buscar_producto: '%s' -> IDs=%s", ref, ids)
+        if _bot_categ_ids:
+            return _formato_catalogo(ref, prods)
         # Resumen de variantes: mixto (Megatoner+Original) -> todo junto en secciones
         _meg_prods = [p for p in prods if _es_megatoner(p)]
         _es_mixto_pre = bool(_meg_prods) and len(_meg_prods) < len(prods)
@@ -2476,6 +2734,11 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         USAR SIEMPRE antes de informar un precio al cliente.
         Aplica la pricelist real del cliente en Odoo (descuentos, condiciones especiales).
         """
+        if not _producto_permitido(product_id):
+            return (
+                f"❌ El producto {product_id} no pertenece al catálogo de este bot. "
+                f"No informes su precio."
+            )
         if _price_fallback == 'hide' and not _tiene_precio_canal(product_id):
             return (
                 f"❌ El producto {product_id} NO tiene precio configurado en la lista "
@@ -2609,6 +2872,13 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             )
         orders = [order_rec]
 
+        if not _producto_permitido(product_id):
+            return (
+                f"❌ El producto {product_id} no pertenece al catálogo que atiende este "
+                f"bot. NO se agregó a la cotización. Dile al cliente que por esta línea "
+                f"solo atiendes los productos de este catálogo y ofrécele los de "
+                f"ese catálogo; no escales por esto."
+            )
         _stock_error = _verificar_stock_o_sugerir(product_id, cantidad)
         if _stock_error:
             return _stock_error
@@ -4759,6 +5029,8 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
         if not mensaje or not mensaje.strip():
             return "Indica la referencia del producto que necesitas (ej: 85A, 664, CE285A)."
+        if _bot_categ_ids:
+            return _referencias_catalogo(mensaje)
 
         # Limpiar modificadores genericos del mensaje
         # NOTA: 'tambor' y 'drum' NO van aqui \u2014 son tipos de repuesto, no ruido.

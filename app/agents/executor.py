@@ -867,7 +867,16 @@ def run_agent(
             "horario": "Horario y atencion",
             "general": "General",
         }
-        _faq_block = "\n\n[INFORMACION OFICIAL DE LA EMPRESA - MEGATONER]\n"
+        # Marca del bot: Megatoner por defecto; otra marca (p. ej. Blizka) si el bot
+        # define su propia URL de sitio (ctx["bot_site_url"]).
+        _marca = "MEGATONER"
+        _su = str(ctx.get("bot_site_url") or "").lower()
+        if _su:
+            import re as _re_marca
+            _mm = _re_marca.search(r"(?:https?://)?(?:www\.)?([a-z0-9-]+)\.", _su)
+            if _mm:
+                _marca = _mm.group(1).upper()
+        _faq_block = f"\n\n[INFORMACION OFICIAL DE LA EMPRESA - {_marca}]\n"
         _faq_block += (
             "USA esta informacion para responder preguntas del cliente. "
             "NUNCA inventes datos que no esten aqui. "

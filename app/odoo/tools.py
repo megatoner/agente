@@ -1885,6 +1885,24 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         return "\n".join(lines)
 
     def _buscar_producto_core(referencia: str):
+        """Búsqueda normal + aprendizaje desde el fabricante cuando no hay nada.
+
+        Si el catálogo no encuentra la referencia y el texto parece un modelo de impresora,
+        se consulta SOLO el sitio del fabricante (app/odoo/fabricante_impresoras.py); si el
+        sitio confirma qué cartuchos usa y los manejamos, el modelo queda registrado como
+        término de similitud de esos productos y la búsqueda se repite. Cualquier duda =
+        no se escribe nada y el resultado es el de siempre. No aplica a bots con catálogo
+        restringido (Blizka: no vende cartuchos).
+        """
+        res = _buscar_producto_core_base(referencia)
+        if res[0] or res[3] != 'ninguna' or _bot_categ_ids:
+            return res
+        from app.odoo import fabricante_impresoras as _fab
+        if _fab.aprender_impresora(odoo, referencia, ch_id, _bot_id).get('aprendido'):
+            return _buscar_producto_core_base(referencia)
+        return res
+
+    def _buscar_producto_core_base(referencia: str):
         """Busca productos y retorna (prods, ids, ref_display, busqueda_tipo).
 
         busqueda_tipo: 'exacta' | 'similar' | 'atributo' | 'ninguna'

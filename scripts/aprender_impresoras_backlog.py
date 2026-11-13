@@ -15,6 +15,7 @@ from app.odoo.fabricante_impresoras import aprender_impresora, parece_impresora 
 
 ap = argparse.ArgumentParser()
 ap.add_argument('--min', type=int, default=2)
+ap.add_argument('--max', type=int, default=None, help='solo términos con a lo sumo N apariciones')
 ap.add_argument('--dry', action='store_true')
 ap.add_argument('--reintentar-errores', metavar='TSV', help='solo los términos con error de un TSV anterior')
 a = ap.parse_args()
@@ -27,7 +28,7 @@ for r in rows:
     t = (r.get('term') or '').strip()
     if t and parece_impresora(t):
         cuenta[t.upper()] = cuenta.get(t.upper(), 0) + r.get('__count', 0)
-terminos = sorted([t for t, n in cuenta.items() if n >= a.min], key=lambda t: -cuenta[t])
+terminos = sorted([t for t, n in cuenta.items() if n >= a.min and (a.max is None or n <= a.max)], key=lambda t: -cuenta[t])
 if a.reintentar_errores:
     con_error = {r['termino'] for r in csv.DictReader(open(a.reintentar_errores), delimiter='\t')
                  if r['motivo'].startswith('error')}

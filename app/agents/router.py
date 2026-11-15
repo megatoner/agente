@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Header
 from typing import Optional, List, Dict, Any
 from app.agents.executor import run_agent
+from app.agents.anthropic_probe import estado_anthropic
 from app.agents.providers import list_available_models, get_llm
 from app.agents.schemas import (
     ExecuteRequest, ExecuteResponse,
@@ -106,4 +107,5 @@ def health():
         app=settings.app_name,
         models_loaded=total_models,
         tools_loaded=len(tools),
+        anthropic=estado_anthropic(),
     )

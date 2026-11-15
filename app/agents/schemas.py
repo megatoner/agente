@@ -78,3 +78,4 @@ class HealthResponse(BaseModel):
     version: str = "1.1.0"
     models_loaded: int
     tools_loaded: int
+    anthropic: Optional[Dict[str, Any]] = None

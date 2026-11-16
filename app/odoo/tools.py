@@ -2076,6 +2076,12 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         # 2026-09-30): pidio toner magenta para la M475dw, MIA ofrecio amarillo y
         # cian (sus terminos exactos 'CE412A'/'CE411A' si estaban bien vinculados
         # en Fase 1 y nunca llegaban a Fase 3), pero el termino exacto 'CE413A'
+        # 'megatoner' (2026-11-16): es el nombre de la casa, no la marca de la impresora. Está dada de
+        # alta como marca OEM (solo 3 productos) y `_get_marca_filter` la tomaba por tal: «664 megatoner»
+        # restringía el catálogo a esos 3 y respondía «No encontré» (54 filas en «Términos no
+        # encontrados», todas del bot Usuario Final). Se quita como ruido, igual que 'original'. Si se
+        # agrega otra palabra a esta lista hay que agregarla también a `_RE_MODIFICADORES` del módulo
+        # de Odoo (`jwb_busqueda_fuente.py`), que es lo que usa el reconciliador.
         # (magenta) estaba SIN vincular a ningun producto (dato roto, corregido
         # aparte) y caia a Fase 3, donde 'magenta CE413A' ya no encontraba nada.
         # Limpiar el color de entrada deja Fase 3 funcionando como red de
@@ -2085,7 +2091,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             r'\b(toner|t[o\u00f3]ner|cartucho|tinta|ink|cartridge|'
             r'sin|con|chip|negro|negra|black|cian|cyan|azul|magenta|'
             r'amarillo|amarilla|yellow|rojo|red|verde|green|gris|gray|grey|'
-            r'tricolor|color|original|compatible|nuevo|nueva|'
+            r'tricolor|color|original|compatible|megatoner|nuevo|nueva|'
             r'para|de|del|la|el|los|las|y|o|a|en|un|una)\b',
             _re.IGNORECASE,
         )
@@ -5257,7 +5263,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             r'necesito|quiero|cotizame|facturame|pide|dame|busco|'
             r'sin|con|chip|negro|negra|black|cian|cyan|azul|magenta|'
             r'amarillo|amarilla|yellow|rojo|red|verde|green|gris|gray|grey|'
-            r'tricolor|color|original|compatible|nuevo|nueva|'
+            r'tricolor|color|original|compatible|megatoner|nuevo|nueva|'
             r'para|de|del|la|el|los|las|y|o|a|en|un|una|por|favor)\b',
             _re.IGNORECASE,
         )

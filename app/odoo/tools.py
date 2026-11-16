@@ -115,6 +115,86 @@ def _es_megatoner(prod):
     return 'megatoner' in categ or 'compatible' in categ
 
 
+# ── Intención del cliente: color y línea (Megatoner / Original) ───────────────
+# «GT52 amarillo megatoner» pide UN producto: la botella amarilla compatible. Antes el color y
+# «megatoner» se descartaban como ruido y el cliente recibía las 6 opciones (3 colores × 2 líneas), o
+# —en `buscar_referencias_mensaje`— se elegía el más vendido aunque fuera de otro color. Solo se
+# usan los colores que NO admiten confusión (negro, amarillo, cian/azul, magenta, tricolor): «rojo»
+# o «red» podrían ser otra tinta (p. ej. Epson Red) y descartar la buena.
+_COLORES_PEDIDOS = {
+    'negro': r'negr[oa]s?|blacks?',
+    'amarillo': r'amarill[oa]s?|yellow',
+    'cian': r'cian(?:es)?|cyan|azul(?:es)?',
+    'magenta': r'magentas?',
+    'tricolor': r'tricolor(?:es)?',
+}
+_RE_COLORES_PEDIDOS = {
+    c: re.compile(r'(?<![a-z0-9])(?:' + pat + r')(?![a-z0-9])') for c, pat in _COLORES_PEDIDOS.items()
+}
+# «compatible con mi HP…» / «compatible para…» es «que le sirve a mi impresora», NO la línea genérica: solo
+# cuenta como línea cuando no va seguido de con/para/a/de.
+_RE_QUIERE_COMPATIBLE = re.compile(
+    r'(?<![a-z0-9])(?:megatoner|compatibles?(?!\s+(?:con|para|a|de)(?![a-z0-9]))|generic[oa]s?)(?![a-z0-9])')
+_RE_QUIERE_ORIGINAL = re.compile(r'(?<![a-z0-9])(?:original(?:es)?|oem|genuin[oa]s?)(?![a-z0-9])')
+
+
+def _sin_tildes(texto):
+    import unicodedata
+    return ''.join(c for c in unicodedata.normalize('NFD', (texto or '').lower()) if unicodedata.category(c) != 'Mn')
+
+
+def _colores_en(texto):
+    """Colores canónicos que nombra un texto: {'amarillo', 'cian', ...}."""
+    t = _sin_tildes(texto)
+    return {c for c, rx in _RE_COLORES_PEDIDOS.items() if rx.search(t)}
+
+
+def _linea_pedida(texto):
+    """'compatible' | 'original' | None según lo que pide el cliente. Si nombra las dos, None."""
+    t = _sin_tildes(texto)
+    comp, orig = bool(_RE_QUIERE_COMPATIBLE.search(t)), bool(_RE_QUIERE_ORIGINAL.search(t))
+    if comp and not orig:
+        return 'compatible'
+    if orig and not comp:
+        return 'original'
+    return None
+
+
+def _es_compatible(prod):
+    return 'megatoner' in (prod.get('jpc_marca') or '').lower() or _es_megatoner(prod)
+
+
+def _colores_de(prod):
+    """Colores del producto: primero el atributo Color, y si no lo trae, el nombre."""
+    return _colores_en(prod.get('color_attr')) or _colores_en(prod.get('name'))
+
+
+def _estrechar_por_intencion(prods, texto):
+    """Deja solo los productos que coinciden con el color y la línea que el cliente nombró.
+
+    Nunca vacía la lista: si nada coincide con lo pedido (p. ej. pidió «original» y solo hay
+    compatibles) se conserva lo que había — ante la duda, mostrar. Cada criterio se aplica por
+    separado, así que un color sin coincidencia no anula la línea pedida, ni al revés.
+    """
+    if len(prods) < 2:
+        return prods
+    out = prods
+    colores = _colores_en(texto)
+    if colores:
+        coinciden = [p for p in out if _colores_de(p) & colores]
+        if coinciden:
+            out = coinciden
+    linea = _linea_pedida(texto)
+    if linea:
+        coinciden = [p for p in out if _es_compatible(p) == (linea == 'compatible')]
+        if coinciden:
+            out = coinciden
+    if len(out) != len(prods):
+        logger.info("intención del cliente (%s%s) deja %d/%d producto(s) ref=%r",
+                    ','.join(sorted(colores)) or '-', ' ' + linea if linea else '', len(out), len(prods), texto)
+    return out
+
+
 def _trigger_resumen(prods):
     """Decide si mostrar resumen de texto en lugar de tarjetas.
 
@@ -2631,6 +2711,8 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 logger.warning(
                     "PRECIO $0: %d producto(s) ocultado(s) por calcular precio 0 en "
                     "pricelist=%s ref=%r ids=%s — revisar reglas de esa lista",
+        # Si el cliente nombró color y/o línea («GT52 amarillo megatoner»), se muestra ESE producto.
+        prods = _estrechar_por_intencion(prods, referencia)
                     len(prods) - len(_vendibles), _bot_pricelist_id, ref, _ocultos,
                 )
             if not _vendibles:
@@ -5297,6 +5379,41 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 "No detecte referencias de productos (minimo 3 digitos). "
                 "Indica la referencia exacta (ej: 85A, 664, CE285A)."
             )
+        def _estrechar_variantes(variantes, texto):
+            """Con una sola referencia en el mensaje, deja solo la variante del color/línea pedidos.
+
+            Sin esto se elegía la MÁS VENDIDA entre todas las que coinciden con la referencia: «664 cian
+            megatoner x2» dejaba en el carrito la tinta Magenta Original. Con varias referencias en el
+            mensaje no se aplica (no se sabe a cuál pertenece cada color).
+            """
+            try:
+                tids = sorted({
+                    (v["product_tmpl_id"][0] if isinstance(v["product_tmpl_id"], list) else v["product_tmpl_id"])
+                    for v in variantes})
+                tmpls = odoo.search_read(
+                    "product.template", [("id", "in", tids)],
+                    ["id", "jpc_pos_name", "name", "jpc_marca", "categ_id"], limit=30,
+                )
+                info = {
+                    t["id"]: {
+                        "name": " ".join(x for x in (t.get("jpc_pos_name"), t.get("name")) if x),
+                        "jpc_marca": t.get("jpc_marca") or "",
+                        "categ_name": (t["categ_id"][1] if isinstance(t.get("categ_id"), (list, tuple))
+                                       and len(t["categ_id"]) > 1 else ""),
+                    }
+                    for t in tmpls
+                }
+            except Exception as _e:
+                logger.warning("buscar_referencias_mensaje: intención del cliente no aplicada: %s", _e)
+                return variantes
+            anotadas = []
+            for v in variantes:
+                tid = v["product_tmpl_id"][0] if isinstance(v["product_tmpl_id"], list) else v["product_tmpl_id"]
+                anotadas.append((v, dict(info.get(tid, {}))))
+            elegidas = _estrechar_por_intencion([d for _, d in anotadas], texto)
+            vivos = {id(d) for d in elegidas}
+            return [v for v, d in anotadas if id(d) in vivos] or variantes
+
 
         # Asociar cantidad a cada referencia: buscar qty entre esta ref y la siguiente.
         # Ademas clasificar cada referencia como repuesto o consumible segun el
@@ -5439,6 +5556,9 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                         tmpl_ids = _buscar_por_atributo_valor(_aid, ref, _modo_f)
                     if tmpl_ids:
                         confidence = "exacta" if _modo_f == 'exacta' and _paso != 'nombre' else "similar"
+
+            if len(pairs) == 1 and len(prods) > 1:
+                prods = _estrechar_variantes(prods, mensaje)
 
             # Registrar el término como «no encontrado» SOLO si ninguna fuente lo resolvió (antes se
             # registraba antes de buscar por similitud y la lista se llenaba de productos que sí existen).

@@ -101,9 +101,22 @@ out = bp(h, '580')
 check("guard de número suelto: '580' no trae L6580 ni ML-2580N", 'L6580' not in out and '2580N' not in out)
 
 print('\n── Atributo genérico (Modelo) ──')
-check("sin la fuente: 'cf258xsc' no se encuentra", NO in bp(herr(BASE), 'cf258xsc'))
-out = bp(herr(BASE + [MODELO]), 'cf258xsc')
-check("con atributo «Modelo»: 'cf258xsc' → Tóner HP 58X", '58X' in out, out.splitlines()[0][:60])
+# El control NO puede depender de un término concreto: en cuanto alguien lo asigna desde «Términos no
+# encontrados» (pasó con «cf258xsc» el 2026-11-16, 16:46) deja de ser «solo lo encuentra el atributo
+# Modelo». Se elige, entre los candidatos, uno que hoy NO se encuentre con la lista base y SÍ con Modelo.
+control = None
+for cand in ('cf258xsc', 'w1510xsc', 'w1500xsc', 'cf259xsc', 'gt52m'):
+    sin, con = bp(herr(BASE), cand), bp(herr(BASE + [MODELO]), cand)
+    if NO in sin and NO not in con:
+        control = (cand, sin, con)
+        break
+if control:
+    cand, sin, con = control
+    check(f"sin la fuente: '{cand}' no se encuentra", NO in sin)
+    check(f"con atributo «Modelo»: '{cand}' sí se encuentra", NO not in con, con.splitlines()[0][:60])
+else:
+    print("  [SALTA] ningún candidato queda solo para el atributo «Modelo» (ya los asignaron como término): "
+          "agregar otro a la lista de candidatos")
 
 print('\n── La lista manda (una fuente apagada no se usa) ──')
 h = herr([CODIGO])

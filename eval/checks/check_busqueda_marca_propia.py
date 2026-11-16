@@ -61,7 +61,7 @@ def bp(q):
 
 
 def opciones(texto):
-    m = re.search(r'en (\d+) opciones', texto)
+    m = re.search(r'en (\d+) (?:opciones|colores|versiones)', texto)
     return int(m.group(1)) if m else (1 if texto and NO not in texto else 0)
 
 
@@ -72,7 +72,10 @@ for q in ('664 megatoner', 'megatoner 664', '664 cian megatoner', 'tinta 664 meg
           '664 megatoner T664120', '664 megatoner epson botella'):
     r = bp(q)
     check(f"«{q}» encuentra", NO not in r and '664' in r, r[:110])
-check("«664 megatoner» da las mismas opciones que «664»", opciones(bp('664 megatoner')) == opciones(base))
+# Desde que el agente respeta la línea pedida (check_busqueda_intencion.py), «megatoner» deja solo los
+# compatibles: las 4 botellas Megatoner, sin los Original ni los HP.
+r4 = bp('664 megatoner')
+check("«664 megatoner» da solo los 4 compatibles Megatoner", opciones(r4) == 4 and 'Originales' not in r4, r4[:110])
 r = bp('T664120 megatoner')
 check("«T664120 megatoner» encuentra la botella negra", NO not in r and 'T664120' in r, r[:110])
 

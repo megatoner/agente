@@ -195,6 +195,48 @@ def _estrechar_por_intencion(prods, texto):
     return out
 
 
+# ── Código de cartucho PROPIO de la marca nombrada («canon crg137») ───────────────
+# Al nombrar una marca («canon», «kyocera»…) el filtro de marca deja solo los productos cuya marca OEM es esa. Un
+# compatible registrado con OTRA marca OEM (el tóner CF283X de Megatoner, OEM «HP», que sirve para el cartucho Canon
+# CRG-137) quedaba escondido: «canon crg137» respondía «No encontré» aunque «crg137» sí lo encontraba. Si con el
+# filtro no hay resultado, se reintenta SIN filtro, pero SOLO con un código que lleve el prefijo propio de esa marca
+# (CRG = Canon, TK = Kyocera, TN/DR/LC = Brother, MLT/CLT = Samsung) y SOLO por coincidencia exacta. Nunca con un
+# número suelto («canon 137» no puede resucitar el Kyocera TK-137) ni con un código de otra marca («canon 83X»).
+_CODIGO_PROPIO_DE_MARCA = {
+    'canon': r'(?<![a-z0-9])crg[\s-]?\d{2,4}[a-z]{0,2}(?![a-z0-9])',
+    'kyocera': r'(?<![a-z0-9])tk[\s-]?\d{3,4}[a-z]{0,2}(?![a-z0-9])',
+    'brother': r'(?<![a-z0-9])(?:tn|dr|lc)[\s-]?\d{2,4}[a-z]{0,3}(?![a-z0-9])',
+    'samsung': r'(?<![a-z0-9])(?:mlt|clt)[\s-]?[a-z]?\d{3,4}[a-z]{0,2}(?![a-z0-9])',
+}
+
+
+# Prefijo de cartucho separado de su número («CRG-137», «CRG 137», «TK 137», «CF-283X»).
+# `REF_PAT` de buscar_referencias_mensaje parte el texto por ahí y se quedaba SOLO con el número: «CRG-137» era
+# «137» y resolvía, con confianza ✅ y dejándolo en el carrito, al Tóner Kyocera TK-137 (producto de otra marca).
+# Se une el prefijo a su número antes de detectar las referencias, con DOS reglas de prudencia (medidas con
+# mensajes reales: las direcciones colombianas traen «LC 11» = local y «CC 85» = centro comercial, y unirlas
+# inventaba referencias que no existen, con su falso «PRODUCTO_NO_ENCONTRADO»):
+#   · con ESPACIO o guion solo CRG y TK (no chocan con abreviaturas de direcciones);
+#   · con guion únicamente TN, DR, CF, CE, CB. Quedan fuera CC y LC (centro comercial / local).
+# Siempre seguido de 2+ dígitos: no toca «HP-85A» ni «MLT-D203L» (la letra tras el guion no es un dígito).
+_RE_PREFIJO_CARTUCHO = re.compile(
+    r'(?<![A-Za-z0-9])(?:(crg|tk)[\s-]+|(tn|dr|cf|ce|cb)-)(?=\d{2,})', re.IGNORECASE)
+
+
+def _codigos_propios_de_marca(marca, texto):
+    """Candidatos a término exacto: el código con el prefijo propio de `marca` tal como se escribió y sin
+    guion/espacio («CRG-137» → ['CRG-137', 'CRG137']). Vacío si la marca no tiene prefijo propio o no hay código."""
+    patron = _CODIGO_PROPIO_DE_MARCA.get((marca or '').strip().lower())
+    if not patron:
+        return []
+    out = []
+    for m in re.finditer(patron, texto or '', re.IGNORECASE):
+        for cand in (m.group(0), re.sub(r'[\s-]', '', m.group(0))):
+            if cand not in out:
+                out.append(cand)
+    return out
+
+
 def _trigger_resumen(prods):
     """Decide si mostrar resumen de texto en lugar de tarjetas.
 
@@ -2374,6 +2416,8 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             return [r["id"] for r in recs]
 
         # ── Detección de marca OEM ────────────────────────────────────────────
+        _marca_detectada = {}   # {'nombre': 'Canon'} cuando _get_marca_filter reconoce una marca
+
         def _get_marca_filter(ref_text):
             """Detecta marca OEM en el texto. Retorna (tmpl_filter, ref_sin_marca).
             tmpl_filter es None si no hay marca o no hay productos con esa marca.
@@ -2455,6 +2499,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             ).strip()
             ref_sin = _re.sub(r' {2,}', ' ', ref_sin).strip()
             logger.debug("_buscar_producto_core: marca OEM detectada id=%s token=%r, ref_sin=%r", brand_id, brand_token, ref_sin)
+            _marca_detectada['nombre'] = next((m["name"] for m in marcas if m["id"] == brand_id), '')
             return tmpl_ids_marca, ref_sin or ref_text
 
         _tmpl_filter, ref_busq = _get_marca_filter(ref)
@@ -2642,6 +2687,19 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 if tmpl_ids:
                     busqueda_tipo = 'similar' if _paso == 'nombre' else 'atributo'
                     prods = _tmpl_to_prods(tmpl_ids)
+
+        # «canon crg137»: con la marca nombrada y sin resultado, se reintenta el código propio de esa marca sin
+        # el filtro de marca (ver _CODIGO_PROPIO_DE_MARCA).
+        if not prods and _tmpl_filter is not None:
+            for _cand in _codigos_propios_de_marca(_marca_detectada.get('nombre'), ref_busq):
+                _ids_cand = _exact(_cand, None)
+                if _ids_cand:
+                    prods = _tmpl_to_prods(_ids_cand)
+                    if prods:
+                        busqueda_tipo = 'exacta'
+                        logger.info("_buscar_producto_core: código propio de %s %r resuelto sin filtro de marca ref=%r",
+                                    _marca_detectada.get('nombre'), _cand, ref)
+                        break
 
         # Registrar el término como «no encontrado» SOLO si ninguna fuente lo resolvió. Antes se
         # registraba al entrar a la fase 3, sin saber aún si un atributo lo resolvía, y la lista de
@@ -5349,7 +5407,9 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             r'para|de|del|la|el|los|las|y|o|a|en|un|una|por|favor)\b',
             _re.IGNORECASE,
         )
-        msg_clean = _MOD.sub(' ', mensaje)
+        # «CRG-137» / «CRG 137» → «CRG137» (ver _RE_PREFIJO_CARTUCHO): sin esto la referencia era solo «137».
+        mensaje_n = _RE_PREFIJO_CARTUCHO.sub(lambda m: m.group(1) or m.group(2), mensaje)
+        msg_clean = _MOD.sub(' ', mensaje_n)
         msg_clean = _re.sub(r' {2,}', ' ', msg_clean).strip()
 
         # Token = referencia si mezcla letra+digito (cualquier cantidad de
@@ -5397,7 +5457,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         # El tipo de repuesto es pegajoso ("almohadilla L3210 y L220" → ambas)
         # hasta que aparezca una palabra de consumible (toner/cartucho/tinta).
         pairs = []
-        msg_low = mensaje.lower()
+        msg_low = mensaje_n.lower()
         search_pos = 0
         prev_end_orig = 0
         sticky_tipo = None
@@ -5409,7 +5469,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             qty = int(qty_m.group(1) or qty_m.group(2)) if qty_m else 1
             pos = msg_low.find(ref.lower(), search_pos)
             if pos >= 0:
-                antes = mensaje[prev_end_orig:pos]
+                antes = mensaje_n[prev_end_orig:pos]
                 search_pos = pos + len(ref)
                 prev_end_orig = pos + len(ref)
             else:

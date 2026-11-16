@@ -134,6 +134,40 @@ for q, color in (('GT52C', 'Cyan'), ('GT52M', 'Magenta'), ('GT52Y', 'Amarillo'),
     check(f"«{q}» → 1 producto, {color}, Megatoner",
           n_opciones(r) == 1 and color in r and 'Megatoner' in r and 'Original' not in r, r[:140])
 
+print("== CRG137 (Canon «Cartridge 137») → tóner CF283X compatible Megatoner, producto 1811 (decisión del usuario, 2026-11-16)")
+# Dato deliberado: la equivalencia CRG137 = CF283X NO la afirma ningún fabricante; la decidió Megatoner. Sin las variantes con
+# guion/espacio el agente (compara exactos al pie de la letra) caía por el número en el exacto «137» del Kyocera TK-137.
+for q in ('CRG137', 'CRG-137', 'CRG 137', 'toner CRG137'):
+    r = bp(q)
+    check(f"«{q}» → el CF283X Megatoner (1811), NO el Kyocera TK-137",
+          n_opciones(r) == 1 and 'CF283X' in r and 'Kyocera' not in r, r[:130])
+
+print("== «canon crg137»: la marca nombrada no esconde el código propio de esa marca")
+# El 1811 es de marca OEM HP; «canon» activaba el filtro de marca y lo escondía. Ahora, sin resultado con filtro, se reintenta SOLO
+# el código con el prefijo propio de la marca (CRG = Canon), por coincidencia exacta.
+for q in ('canon crg137', 'canon CRG-137', 'canon CRG 137', 'toner canon crg137', 'cartucho canon CRG137 negro'):
+    r = bp(q)
+    check(f"«{q}» → el CF283X Megatoner (1811), NO el Kyocera",
+          n_opciones(r) == 1 and 'CF283X' in r and 'Kyocera' not in r, r[:120])
+print("== …y lo que NO debe cambiar (sin colisiones entre marcas)")
+for q, motivo in (('canon 137', 'número suelto: no resucita el Kyocera TK-137'),
+                  ('canon 83X', 'código de HP con marca Canon: no ofrece el HP 83X'),
+                  ('kyocera crg137', 'código de Canon con marca Kyocera: contradictorio'),
+                  ('canon tk137', 'código de Kyocera con marca Canon: no ofrece el Kyocera'),
+                  ('toner canon 137 MF244dw', 'sin código CRG: no se infiere')):
+    r = bp(q)
+    check(f"«{q}» sigue sin encontrarse ({motivo})", NO in r, r[:100])
+print("== Funciones puras del código propio de marca")
+check("Canon: «crg-137 mf244dw» → CRG-137 y CRG137", T._codigos_propios_de_marca('Canon', 'crg-137 mf244dw') == ['crg-137', 'crg137'])
+check("Canon: «CRG 137» → con espacio y sin él", T._codigos_propios_de_marca('canon', 'CRG 137') == ['CRG 137', 'CRG137'])
+check("Canon: un número suelto no es código propio", T._codigos_propios_de_marca('Canon', '137') == [])
+check("Canon: «83X» no es de Canon", T._codigos_propios_de_marca('Canon', '83X') == [])
+check("HP: sin prefijo propio → nada", T._codigos_propios_de_marca('HP', 'crg137 cf283x') == [])
+check("Kyocera: «tk 5242c» y «TK-5242C»", T._codigos_propios_de_marca('Kyocera', 'tk 5242c') == ['tk 5242c', 'tk5242c']
+      and T._codigos_propios_de_marca('Kyocera', 'TK-5242C')[-1] == 'TK5242C')
+check("Brother: «TN-760» y «dr 730»", T._codigos_propios_de_marca('Brother', 'TN-760 y dr 730') == ['TN-760', 'TN760', 'dr 730', 'dr730'])
+check("sin marca → nada", T._codigos_propios_de_marca('', 'crg137') == [] and T._codigos_propios_de_marca(None, 'crg137') == [])
+
 print("== Marcas de verdad y 664 (regresión)")
 r = bp('664 negra')
 check("«664 negra» → solo negros", n_opciones(r) >= 1 and all(c not in r for c in ('Cian', 'Amarillo', 'Magenta', 'Tricolor')) and 'Negro' in r, r[:160])

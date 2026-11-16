@@ -102,10 +102,19 @@ check("guard de número suelto: '580' no trae L6580 ni ML-2580N", 'L6580' not in
 
 print('\n── Atributo genérico (Modelo) ──')
 # El control NO puede depender de un término concreto: en cuanto alguien lo asigna desde «Términos no
-# encontrados» (pasó con «cf258xsc» el 2026-11-16, 16:46) deja de ser «solo lo encuentra el atributo
-# Modelo». Se elige, entre los candidatos, uno que hoy NO se encuentre con la lista base y SÍ con Modelo.
+# encontrados» deja de ser «solo lo encuentra el atributo Modelo» (pasó con «cf258xsc», «w1510xsc», «gt52m»…
+# y la lista fija de candidatos se agotó EN SILENCIO: el check seguía en verde pero con 2 aserciones menos).
+# Los candidatos salen del propio catálogo: valores del atributo «Modelo» sin su prefijo «M-» (el código del
+# fabricante), probando hasta encontrar uno que hoy NO se encuentre con la lista base y SÍ con Modelo.
+from app.odoo.client import get_odoo_client  # noqa: E402
+_cands = []
+for _v in get_odoo_client().search_read('product.attribute.value', [('attribute_id', '=', 22), ('name', 'ilike', 'M-')],
+                                        ['name'], limit=400, order='id desc'):
+    _n = (_v['name'] or '').split(':', 1)[-1].strip()
+    if _n.upper().startswith('M-') and len(_n) >= 7:
+        _cands.append(_n[2:])
 control = None
-for cand in ('cf258xsc', 'w1510xsc', 'w1500xsc', 'cf259xsc', 'gt52m'):
+for cand in _cands[:30]:
     sin, con = bp(herr(BASE), cand), bp(herr(BASE + [MODELO]), cand)
     if NO in sin and NO not in con:
         control = (cand, sin, con)
@@ -115,8 +124,8 @@ if control:
     check(f"sin la fuente: '{cand}' no se encuentra", NO in sin)
     check(f"con atributo «Modelo»: '{cand}' sí se encuentra", NO not in con, con.splitlines()[0][:60])
 else:
-    print("  [SALTA] ningún candidato queda solo para el atributo «Modelo» (ya los asignaron como término): "
-          "agregar otro a la lista de candidatos")
+    check("hay al menos un código que solo encuentre el atributo «Modelo» (control de «la lista manda»)", False,
+          f"se probaron {len(_cands[:30])} valores de Modelo y todos ya se encuentran sin esa fuente")
 
 print('\n── La lista manda (una fuente apagada no se usa) ──')
 h = herr([CODIGO])

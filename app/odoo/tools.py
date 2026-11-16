@@ -260,6 +260,15 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
     )
     # El bot solo responde con las FAQs propias (no las globales de Megatoner).
     _faq_solo_propias = bool((odoo_context or {}).get("faq_solo_propias"))
+    # Dónde busca productos este bot: lista ORDENADA de fuentes ACTIVAS configurada en Odoo
+    # («Dónde busca productos el bot», pestaña Ventas): [{tipo, atributo_id, coincidencia,
+    # es_impresora}]. Ausente o vacía = el orden de siempre (exacto → similar → impresoras
+    # compatibles → Sku OEM), así que un bot sin la lista, o un Odoo que aún no la manda, se
+    # comporta exactamente igual que antes de existir esta configuración.
+    _fuentes_busqueda = [
+        f for f in ((odoo_context or {}).get("busqueda_fuentes") or [])
+        if isinstance(f, dict) and f.get("tipo")
+    ]
 
     _commercial_cache = {}
 
@@ -1369,6 +1378,152 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             logger.warning("_buscar_por_sku_oem: %s", e)
             return []
 
+    # ── Fuentes de búsqueda configurables (código interno, nombre, atributos) ──────────
+    # Hasta ahora solo se buscaba por términos (exacto/similar) y por los atributos
+    # «Impresoras compatibles» y «Sku OEM»: el código interno (`default_code`) NUNCA se
+    # buscaba, aunque el cliente lo pida tal cual lo ve en sus cotizaciones (caso 121070:
+    # 415 variantes publicadas con código y ninguna encontrable por él).
+    def _pasos_busqueda():
+        """[(paso, fuente|None)] en el orden configurado para este bot.
+
+        Pasos: exacto, similar, impresora, sku (con la lógica propia de siempre), y los nuevos:
+        codigo, nombre, atributo. Un paso de la lista que repite uno ya incluido se ignora."""
+        legado = [("exacto", None), ("similar", None), ("impresora", None), ("sku", None)]
+        if not _fuentes_busqueda:
+            return legado
+        pasos, vistos = [], set()
+        for f in _fuentes_busqueda:
+            t = f.get("tipo")
+            if t == "atributo":
+                try:
+                    aid = int(f.get("atributo_id") or 0)
+                except (TypeError, ValueError):
+                    aid = 0
+                if not aid:
+                    continue
+                if f.get("es_impresora") or aid == _ATTR_COMPAT_IMPRESORA:
+                    paso = "impresora"
+                elif aid == _ATTR_SKU_OEM:
+                    paso = "sku"
+                else:
+                    paso = "atributo"
+            elif t in ("exacto", "similar", "codigo", "nombre"):
+                paso = t
+            else:
+                continue
+            if paso != "atributo":
+                if paso in vistos:
+                    continue
+                vistos.add(paso)
+            pasos.append((paso, f))
+        return pasos or legado
+
+    def _coincide_texto(valor, termino, modo):
+        """¿`valor` coincide con `termino` según el modo? Sin distinguir mayúsculas.
+        exacta = igual · inicio = empieza una palabra · palabra = palabra completa · contiene."""
+        v = (valor or "").lower().strip()
+        t = (termino or "").lower().strip()
+        if not v or not t:
+            return False
+        if modo == "exacta":
+            return v == t
+        if modo == "contiene":
+            return t in v
+        patron = r"(?<![a-z0-9])" + re.escape(t).replace(r"\ ", r"\s+")
+        if modo == "palabra":
+            patron += r"(?![a-z0-9])"
+        return re.search(patron, v) is not None
+
+    def _modo_efectivo(termino, modo):
+        """Los números sueltos de 1 a 3 dígitos nunca usan «contiene» (580 ≠ L6580)."""
+        if modo == "contiene" and re.fullmatch(r"\d{1,3}", termino or ""):
+            return "inicio"
+        return modo or "exacta"
+
+    def _buscar_por_codigo(termino, modo, tmpl_filter=None) -> list:
+        """IDs de product.template cuyo código interno (default_code) coincide. Solo publicados."""
+        termino = (termino or "").strip()
+        if not termino:
+            return []
+        modo = _modo_efectivo(termino, modo)
+        try:
+            dom = [("default_code", "ilike", termino), ("active", "=", True),
+                   ("sale_ok", "=", True), ("is_published", "=", True)]
+            if tmpl_filter is not None:
+                dom.append(("product_tmpl_id", "in", tmpl_filter))
+            recs = odoo.search_read("product.product", dom, ["id", "default_code", "product_tmpl_id"], limit=100)
+        except Exception as e:
+            logger.warning("_buscar_por_codigo(%r): %s", termino, e)
+            return []
+        ids = []
+        for r in recs:
+            if _coincide_texto(r.get("default_code"), termino, modo):
+                tid = r["product_tmpl_id"][0] if isinstance(r.get("product_tmpl_id"), (list, tuple)) else r.get("product_tmpl_id")
+                if tid and tid not in ids:
+                    ids.append(tid)
+        return ids[:10]
+
+    def _buscar_por_nombre(termino, modo, tmpl_filter=None) -> list:
+        """IDs de product.template cuyo nombre coincide. Solo con el texto completo (nunca por
+        palabra suelta: «epson» devolvería medio catálogo). Solo publicados."""
+        termino = (termino or "").strip()
+        if len(termino) < 3:
+            return []
+        modo = _modo_efectivo(termino, modo)
+        try:
+            dom = [("name", "ilike", termino), ("active", "=", True),
+                   ("sale_ok", "=", True), ("is_published", "=", True)]
+            if tmpl_filter is not None:
+                dom.append(("id", "in", tmpl_filter))
+            recs = odoo.search_read("product.template", dom, ["id", "name", "jpc_pos_name"], limit=200)
+        except Exception as e:
+            logger.warning("_buscar_por_nombre(%r): %s", termino, e)
+            return []
+        return [r["id"] for r in recs
+                if _coincide_texto(r.get("name"), termino, modo)
+                or _coincide_texto(r.get("jpc_pos_name"), termino, modo)][:10]
+
+    def _buscar_por_atributo_valor(attr_id, termino, modo, tmpl_filter=None) -> list:
+        """IDs de product.template con un valor del atributo `attr_id` que coincide. Solo publicados."""
+        termino = (termino or "").strip()
+        if not termino or not attr_id:
+            return []
+        modo = _modo_efectivo(termino, modo)
+        try:
+            vals = odoo.search_read(
+                "product.attribute.value",
+                [("attribute_id", "=", int(attr_id)), ("name", "ilike", termino)],
+                ["id", "name"], limit=100)
+            vals = [v for v in vals if _coincide_texto(v.get("name"), termino, modo)]
+            if not vals:
+                return []
+            ptavs = odoo.search_read(
+                "product.template.attribute.value",
+                [("product_attribute_value_id", "in", [v["id"] for v in vals])],
+                ["product_tmpl_id"], limit=200)
+            cand = list({p["product_tmpl_id"][0] for p in ptavs if p.get("product_tmpl_id")})
+            if not cand:
+                return []
+            dom = [("id", "in", cand), ("active", "=", True),
+                   ("sale_ok", "=", True), ("is_published", "=", True)]
+            if tmpl_filter is not None:
+                dom.append(("id", "in", tmpl_filter))
+            return [r["id"] for r in odoo.search_read("product.template", dom, ["id"], limit=10)]
+        except Exception as e:
+            logger.warning("_buscar_por_atributo_valor(%s, %r): %s", attr_id, termino, e)
+            return []
+
+    def _marcas_distintas(tmpl_ids) -> set:
+        """Marcas OEM distintas entre esas plantillas (para no ofrecer un HP y un Canon a la vez
+        cuando el cliente no dijo la marca)."""
+        try:
+            return {m["jpc_marca_oem_id"][1]
+                    for m in odoo.read("product.template", tmpl_ids, ["jpc_marca_oem_id"])
+                    if m.get("jpc_marca_oem_id")}
+        except Exception as e:
+            logger.warning("_marcas_distintas: %s", e)
+            return set()
+
     def _enrich_prods(prods):
         """Agrega jpc_pos_name y URL del sitio web (megatoner.co) a cada product.product."""
         if not prods:
@@ -2244,19 +2399,6 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         prods = []
         busqueda_tipo = 'ninguna'
 
-        # Fase 1: busqueda exacta en jpc_search_exact_ids
-        tmpl_ids = _exact(ref_busq, _tmpl_filter)
-        if not tmpl_ids:
-            for tok in tokens_busq:
-                if len(tok) < 3:
-                    continue
-                tmpl_ids = _exact(tok, _tmpl_filter)
-                if tmpl_ids:
-                    break
-        if tmpl_ids:
-            busqueda_tipo = 'exacta'
-            prods = _tmpl_to_prods(tmpl_ids)
-
         # Fase 2: busqueda similar (silenciosa — el aviso se lanza solo si llega a Fase 3)
         # Refs "cortas" (<2 digitos, ej. U4, M6) NUNCA entran aqui: el ilike
         # parcial de "similar" es demasiado propenso a falsos positivos con
@@ -2266,112 +2408,166 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 return len(t) >= 3
             return len(_re.findall(r'\d', t)) >= 2
 
-        if not prods and _valido_para_similar(ref_busq):
-            busqueda_tipo = 'similar'
-            valid_tokens = [t for t in tokens_busq if _valido_para_similar(t)]
-
-            # Número puro: respetar el límite de número completo, igual que en la
-            # búsqueda por token. `_similar` a secas hace ilike '%122%', que matchea
-            # el término '4122' (LaserJet 4122, del tóner HP 12A) y devuelve un
-            # producto sin relación. Caso real 2026-08-23 (Hernan, 573103720445):
-            # buscar 'HP 122' devolvía el Tóner HP 12A. La regla ya existía en
-            # `_similar_numero_completo` pero solo se aplicaba al fallback por
-            # token, no a esta primera llamada con la referencia completa.
-            if _re.fullmatch(r'\d+', ref_busq):
-                tmpl_ids = _similar_numero_completo(ref_busq, _tmpl_filter)
-            else:
-                tmpl_ids = _similar(ref_busq, _tmpl_filter)
-            if not tmpl_ids:
-                if len(valid_tokens) >= 2:
-                    # Interseccion de tokens: evita que un token generico devuelva demasiados
-                    token_results = []
-                    for tok in valid_tokens:
-                        # Numero puro: respetar limite (141 != 1410)
-                        if _re.fullmatch(r'\d+', tok):
-                            tok_ids = set(_similar_numero_completo(tok, _tmpl_filter))
-                        else:
-                            tok_ids = set(_similar(tok, _tmpl_filter))
-                        if not tok_ids:
-                            base = _re.sub(r'[a-zA-Z]+$', '', tok)
-                            if base and base != tok and len(base) >= 3:
-                                if _re.fullmatch(r'\d+', base):
-                                    tok_ids = set(_similar_numero_completo(base, _tmpl_filter))
-                                else:
-                                    tok_ids = set(_similar(base, _tmpl_filter))
-                        if tok_ids:
-                            token_results.append(tok_ids)
-                    if token_results:
-                        token_results.sort(key=lambda s: len(s))
-                        intersection = token_results[0]
-                        for other in token_results[1:]:
-                            narrowed = intersection & other
-                            if narrowed:
-                                intersection = narrowed
-                        tmpl_ids = list(intersection)
-                    else:
-                        tmpl_ids = []
-                else:
-                    # Un solo token
-                    for tok in valid_tokens:
-                        if _re.fullmatch(r'\d+', tok):
-                            tmpl_ids = _similar_numero_completo(tok, _tmpl_filter)
-                        else:
-                            tmpl_ids = _similar(tok, _tmpl_filter)
+        # Orden de búsqueda configurable por bot («Dónde busca productos el bot»). Sin lista
+        # configurada el orden es el de siempre: exacto → similar → impresoras → Sku OEM.
+        # Cada rama conserva su lógica original; solo cambia el orden en que se prueban.
+        for _paso, _fuente in _pasos_busqueda():
+            if prods:
+                break
+            if _paso == 'exacto':
+                # Fase 1: busqueda exacta en jpc_search_exact_ids
+                tmpl_ids = _exact(ref_busq, _tmpl_filter)
+                if not tmpl_ids:
+                    for tok in tokens_busq:
+                        if len(tok) < 3:
+                            continue
+                        tmpl_ids = _exact(tok, _tmpl_filter)
                         if tmpl_ids:
                             break
-                        base = _re.sub(r'[a-zA-Z]+$', '', tok)
-                        if base and base != tok and len(base) >= 3:
-                            if _re.fullmatch(r'\d+', base):
-                                tmpl_ids = _similar_numero_completo(base, _tmpl_filter)
-                            else:
-                                tmpl_ids = _similar(base, _tmpl_filter)
-                            if tmpl_ids:
-                                break
-            if tmpl_ids:
-                # Ambigüedad de marca: el cliente no dio marca (_tmpl_filter is None,
-                # _get_marca_filter no detectó HP/Samsung/etc en el mensaje) y el match
-                # por número suelto cae en templates de MARCAS OEM distintas (ej: HP
-                # LaserJet 2015 vs Samsung ML-2015, mismo "2015" por coincidencia).
-                # Si el cliente ya dio la marca, _tmpl_filter ya viene acotado y esto
-                # nunca dispara.
-                if _tmpl_filter is None and len(tmpl_ids) > 1:
-                    try:
-                        _marca_check = odoo.read(
-                            "product.template", tmpl_ids, ["jpc_marca_oem_id"],
-                        )
-                        _marcas_presentes = {
-                            m["jpc_marca_oem_id"][1] for m in _marca_check
-                            if m.get("jpc_marca_oem_id")
-                        }
-                    except Exception as _e:
-                        logger.warning("_buscar_producto_core: error chequeando marca ambigua: %s", _e)
-                        _marcas_presentes = set()
-                    if len(_marcas_presentes) > 1:
-                        _marcas_txt = ", ".join(sorted(_marcas_presentes))
-                        logger.info(
-                            "_buscar_producto_core: '%s' ambiguo entre marcas %s (tmpl=%s)",
-                            ref, _marcas_txt, tmpl_ids,
-                        )
-                        return [], [], ref, f'ambigua_marca:{_marcas_txt}'
-                prods = _tmpl_to_prods(tmpl_ids)
+                if tmpl_ids:
+                    busqueda_tipo = 'exacta'
+                    prods = _tmpl_to_prods(tmpl_ids)
 
-        # Fase 3: fallback por atributos e impresoras (con aviso al cliente)
-        if not prods:
-            if ch_id and _bot_id:
-                try:
-                    odoo.execute_kw(
-                        'jpc.whatsapp.bot.config', 'enviar_aviso_busqueda_similar',
-                        [[_bot_id], ch_id, ref],
-                    )
-                except Exception as _e:
-                    logger.warning("_buscar_producto_core: aviso atributo error: %s", _e)
-            prods = _enrich_prods(_buscar_por_atributo_impresora(ref))
-            if prods:
-                busqueda_tipo = 'atributo'
-        if not prods:
-            prods = _enrich_prods(_buscar_por_sku_oem(ref))
-            if prods:
-                busqueda_tipo = 'atributo'
+            elif _paso == 'similar':
+                if not prods and _valido_para_similar(ref_busq):
+                    busqueda_tipo = 'similar'
+                    valid_tokens = [t for t in tokens_busq if _valido_para_similar(t)]
+
+                    # Número puro: respetar el límite de número completo, igual que en la
+                    # búsqueda por token. `_similar` a secas hace ilike '%122%', que matchea
+                    # el término '4122' (LaserJet 4122, del tóner HP 12A) y devuelve un
+                    # producto sin relación. Caso real 2026-08-23 (Hernan, 573103720445):
+                    # buscar 'HP 122' devolvía el Tóner HP 12A. La regla ya existía en
+                    # `_similar_numero_completo` pero solo se aplicaba al fallback por
+                    # token, no a esta primera llamada con la referencia completa.
+                    if _re.fullmatch(r'\d+', ref_busq):
+                        tmpl_ids = _similar_numero_completo(ref_busq, _tmpl_filter)
+                    else:
+                        tmpl_ids = _similar(ref_busq, _tmpl_filter)
+                    if not tmpl_ids:
+                        if len(valid_tokens) >= 2:
+                            # Interseccion de tokens: evita que un token generico devuelva demasiados
+                            token_results = []
+                            for tok in valid_tokens:
+                                # Numero puro: respetar limite (141 != 1410)
+                                if _re.fullmatch(r'\d+', tok):
+                                    tok_ids = set(_similar_numero_completo(tok, _tmpl_filter))
+                                else:
+                                    tok_ids = set(_similar(tok, _tmpl_filter))
+                                if not tok_ids:
+                                    base = _re.sub(r'[a-zA-Z]+$', '', tok)
+                                    if base and base != tok and len(base) >= 3:
+                                        if _re.fullmatch(r'\d+', base):
+                                            tok_ids = set(_similar_numero_completo(base, _tmpl_filter))
+                                        else:
+                                            tok_ids = set(_similar(base, _tmpl_filter))
+                                if tok_ids:
+                                    token_results.append(tok_ids)
+                            if token_results:
+                                token_results.sort(key=lambda s: len(s))
+                                intersection = token_results[0]
+                                for other in token_results[1:]:
+                                    narrowed = intersection & other
+                                    if narrowed:
+                                        intersection = narrowed
+                                tmpl_ids = list(intersection)
+                            else:
+                                tmpl_ids = []
+                        else:
+                            # Un solo token
+                            for tok in valid_tokens:
+                                if _re.fullmatch(r'\d+', tok):
+                                    tmpl_ids = _similar_numero_completo(tok, _tmpl_filter)
+                                else:
+                                    tmpl_ids = _similar(tok, _tmpl_filter)
+                                if tmpl_ids:
+                                    break
+                                base = _re.sub(r'[a-zA-Z]+$', '', tok)
+                                if base and base != tok and len(base) >= 3:
+                                    if _re.fullmatch(r'\d+', base):
+                                        tmpl_ids = _similar_numero_completo(base, _tmpl_filter)
+                                    else:
+                                        tmpl_ids = _similar(base, _tmpl_filter)
+                                    if tmpl_ids:
+                                        break
+                    if tmpl_ids:
+                        # Ambigüedad de marca: el cliente no dio marca (_tmpl_filter is None,
+                        # _get_marca_filter no detectó HP/Samsung/etc en el mensaje) y el match
+                        # por número suelto cae en templates de MARCAS OEM distintas (ej: HP
+                        # LaserJet 2015 vs Samsung ML-2015, mismo "2015" por coincidencia).
+                        # Si el cliente ya dio la marca, _tmpl_filter ya viene acotado y esto
+                        # nunca dispara.
+                        if _tmpl_filter is None and len(tmpl_ids) > 1:
+                            try:
+                                _marca_check = odoo.read(
+                                    "product.template", tmpl_ids, ["jpc_marca_oem_id"],
+                                )
+                                _marcas_presentes = {
+                                    m["jpc_marca_oem_id"][1] for m in _marca_check
+                                    if m.get("jpc_marca_oem_id")
+                                }
+                            except Exception as _e:
+                                logger.warning("_buscar_producto_core: error chequeando marca ambigua: %s", _e)
+                                _marcas_presentes = set()
+                            if len(_marcas_presentes) > 1:
+                                _marcas_txt = ", ".join(sorted(_marcas_presentes))
+                                logger.info(
+                                    "_buscar_producto_core: '%s' ambiguo entre marcas %s (tmpl=%s)",
+                                    ref, _marcas_txt, tmpl_ids,
+                                )
+                                return [], [], ref, f'ambigua_marca:{_marcas_txt}'
+                        prods = _tmpl_to_prods(tmpl_ids)
+
+            elif _paso == 'impresora':
+                prods = _enrich_prods(_buscar_por_atributo_impresora(ref))
+                if prods:
+                    busqueda_tipo = 'atributo'
+            elif _paso == 'sku':
+                prods = _enrich_prods(_buscar_por_sku_oem(ref))
+                if prods:
+                    busqueda_tipo = 'atributo'
+            elif _paso == 'codigo':
+                # Código interno (default_code). Un código identifica UN producto: coincidencia
+                # exacta por defecto, y también por token (un código lleva dígitos).
+                _modo_f = (_fuente or {}).get('coincidencia') or 'exacta'
+                tmpl_ids = _buscar_por_codigo(ref_busq, _modo_f, _tmpl_filter)
+                if not tmpl_ids:
+                    for tok in tokens_busq:
+                        if len(tok) < 4 or not any(c.isdigit() for c in tok):
+                            continue
+                        tmpl_ids = _buscar_por_codigo(tok, _modo_f, _tmpl_filter)
+                        if tmpl_ids:
+                            break
+                if tmpl_ids:
+                    busqueda_tipo = 'exacta'
+                    prods = _tmpl_to_prods(tmpl_ids)
+            elif _paso in ('nombre', 'atributo'):
+                _modo_f = (_fuente or {}).get('coincidencia') or ('inicio' if _paso == 'nombre' else 'contiene')
+                if _paso == 'nombre':
+                    tmpl_ids = _buscar_por_nombre(ref_busq, _modo_f, _tmpl_filter)
+                else:
+                    tmpl_ids = _buscar_por_atributo_valor((_fuente or {}).get('atributo_id'), ref_busq, _modo_f, _tmpl_filter)
+                if tmpl_ids and _tmpl_filter is None and len(tmpl_ids) > 1:
+                    # Sin marca en el mensaje, un match parcial puede caer en marcas distintas
+                    # (HP vs Canon): se pregunta cuál, igual que en la fase similar.
+                    _marcas_pres = _marcas_distintas(tmpl_ids)
+                    if len(_marcas_pres) > 1:
+                        return [], [], ref, 'ambigua_marca:' + ', '.join(sorted(_marcas_pres))
+                if tmpl_ids:
+                    busqueda_tipo = 'similar' if _paso == 'nombre' else 'atributo'
+                    prods = _tmpl_to_prods(tmpl_ids)
+
+        # Registrar el término como «no encontrado» SOLO si ninguna fuente lo resolvió. Antes se
+        # registraba al entrar a la fase 3, sin saber aún si un atributo lo resolvía, y la lista de
+        # «Términos no encontrados» se llenaba de productos que sí existen.
+        if not prods and ch_id and _bot_id:
+            try:
+                odoo.execute_kw(
+                    'jpc.whatsapp.bot.config', 'enviar_aviso_busqueda_similar',
+                    [[_bot_id], ch_id, ref],
+                )
+            except Exception as _e:
+                logger.warning("_buscar_producto_core: aviso atributo error: %s", _e)
 
         # Asegurar flag en_stock para resultados de fallback (atributo/sku que no pasan por _tmpl_to_prods)
         for p in prods:
@@ -5164,65 +5360,90 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                     repuestos_nf.append((ref, bt))
                     continue
 
-            # Fase 1: exacto en jpc_search_exact_ids
-            if not tmpl_ids:
-                term_recs = odoo.search_read(
-                    "jpc.product.search.term",
-                    [("name", "=ilike", ref)],
-                    ["id"], limit=10,
-                )
-                if term_recs:
-                    term_ids = [t["id"] for t in term_recs]
-                    tmpl_recs = odoo.search_read(
-                        "product.template",
-                        [("jpc_search_exact_ids", "in", term_ids), ("active", "=", True), ("is_published", "=", True)],
-                        ["id"], limit=5,
-                    )
-                    tmpl_ids = [r["id"] for r in tmpl_recs]
-                    if tmpl_ids:
-                        confidence = "exacta"
-
-            # Fase 2: similar en jpc_search_similar_ids (nunca para refs cortas)
-            if not tmpl_ids and not _ref_es_corta(ref):
-                if ch_id and _bot_id:
-                    try:
-                        odoo.execute_kw(
-                            "jpc.whatsapp.bot.config", "enviar_aviso_busqueda_similar",
-                            [[_bot_id], ch_id, ref],
-                        )
-                    except Exception as _e:
-                        logger.warning("buscar_referencias_mensaje aviso: %s", _e)
-
-                sim_recs = odoo.search_read(
-                    "product.template",
-                    [("jpc_search_similar_ids.name", "ilike", ref), ("active", "=", True), ("is_published", "=", True)],
-                    ["id"], limit=5,
-                )
-                tmpl_ids = [r["id"] for r in sim_recs]
+            # Orden de búsqueda configurable por bot («Dónde busca productos el bot»). Sin lista el
+            # orden es el de siempre: exacto → similar (+ solo dígitos). Las fases conservan su lógica.
+            # «impresora» no aplica aquí: un modelo de impresora se resuelve con buscar_producto.
+            for _paso, _fuente in _pasos_busqueda():
                 if tmpl_ids:
-                    confidence = "similar"
+                    break
+                if _paso == 'exacto':
+                    # Fase 1: exacto en jpc_search_exact_ids
+                    if not tmpl_ids:
+                        term_recs = odoo.search_read(
+                            "jpc.product.search.term",
+                            [("name", "=ilike", ref)],
+                            ["id"], limit=10,
+                        )
+                        if term_recs:
+                            term_ids = [t["id"] for t in term_recs]
+                            tmpl_recs = odoo.search_read(
+                                "product.template",
+                                [("jpc_search_exact_ids", "in", term_ids), ("active", "=", True), ("is_published", "=", True)],
+                                ["id"], limit=5,
+                            )
+                            tmpl_ids = [r["id"] for r in tmpl_recs]
+                            if tmpl_ids:
+                                confidence = "exacta"
 
-            # Fase 3: solo digitos
-            if not tmpl_ids:
-                digits = _re.sub(r"[^0-9]", "", ref)
-                if len(digits) >= 3:
-                    # Buscar con limite de numero completo (boundary)
-                    boundary = _re.compile(r"(?<!\d)" + _re.escape(digits) + r"(?!\d)", _re.IGNORECASE)
-                    term_recs3 = odoo.search_read(
-                        "jpc.product.search.term",
-                        [("name", "ilike", digits), ("search_type", "=", "similar")],
-                        ["id", "name"], limit=100,
-                    )
-                    matching_ids = [r["id"] for r in term_recs3 if boundary.search(r["name"])]
-                    if matching_ids:
-                        tmpl_recs3 = odoo.search_read(
+                elif _paso == 'similar':
+                    # Fase 2: similar en jpc_search_similar_ids (nunca para refs cortas)
+                    if not tmpl_ids and not _ref_es_corta(ref):
+                        sim_recs = odoo.search_read(
                             "product.template",
-                            [("jpc_search_similar_ids", "in", matching_ids), ("active", "=", True), ("is_published", "=", True)],
+                            [("jpc_search_similar_ids.name", "ilike", ref), ("active", "=", True), ("is_published", "=", True)],
                             ["id"], limit=5,
                         )
-                        tmpl_ids = [r["id"] for r in tmpl_recs3]
+                        tmpl_ids = [r["id"] for r in sim_recs]
                         if tmpl_ids:
-                            confidence = "numero"
+                            confidence = "similar"
+
+                    # Fase 3: solo digitos
+                    if not tmpl_ids:
+                        digits = _re.sub(r"[^0-9]", "", ref)
+                        if len(digits) >= 3:
+                            # Buscar con limite de numero completo (boundary)
+                            boundary = _re.compile(r"(?<!\d)" + _re.escape(digits) + r"(?!\d)", _re.IGNORECASE)
+                            term_recs3 = odoo.search_read(
+                                "jpc.product.search.term",
+                                [("name", "ilike", digits), ("search_type", "=", "similar")],
+                                ["id", "name"], limit=100,
+                            )
+                            matching_ids = [r["id"] for r in term_recs3 if boundary.search(r["name"])]
+                            if matching_ids:
+                                tmpl_recs3 = odoo.search_read(
+                                    "product.template",
+                                    [("jpc_search_similar_ids", "in", matching_ids), ("active", "=", True), ("is_published", "=", True)],
+                                    ["id"], limit=5,
+                                )
+                                tmpl_ids = [r["id"] for r in tmpl_recs3]
+                                if tmpl_ids:
+                                    confidence = "numero"
+
+                elif _paso == 'codigo':
+                    # Código interno (default_code): identifica UN producto.
+                    tmpl_ids = _buscar_por_codigo(ref, (_fuente or {}).get('coincidencia') or 'exacta')
+                    if tmpl_ids:
+                        confidence = "exacta"
+                elif _paso in ('nombre', 'atributo', 'sku'):
+                    _modo_f = (_fuente or {}).get('coincidencia') or ('inicio' if _paso == 'nombre' else 'contiene')
+                    if _paso == 'nombre':
+                        tmpl_ids = _buscar_por_nombre(ref, _modo_f)
+                    else:
+                        _aid = _ATTR_SKU_OEM if _paso == 'sku' else (_fuente or {}).get('atributo_id')
+                        tmpl_ids = _buscar_por_atributo_valor(_aid, ref, _modo_f)
+                    if tmpl_ids:
+                        confidence = "exacta" if _modo_f == 'exacta' and _paso != 'nombre' else "similar"
+
+            # Registrar el término como «no encontrado» SOLO si ninguna fuente lo resolvió (antes se
+            # registraba antes de buscar por similitud y la lista se llenaba de productos que sí existen).
+            if not tmpl_ids and not _ref_es_corta(ref) and ch_id and _bot_id:
+                try:
+                    odoo.execute_kw(
+                        "jpc.whatsapp.bot.config", "enviar_aviso_busqueda_similar",
+                        [[_bot_id], ch_id, ref],
+                    )
+                except Exception as _e:
+                    logger.warning("buscar_referencias_mensaje aviso: %s", _e)
 
             # No encontrado
             if not tmpl_ids:

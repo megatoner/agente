@@ -125,6 +125,15 @@ check("«GT52 negro megatoner»: no hay negro GT52, pero sí compatibles → los
 r = bp('tinta compatible con mi hp smart tank GT52')
 check("«compatible con mi HP» no oculta los originales (siguen las 6 opciones)", n_opciones(r) == 6, r[:110])
 
+print("== Códigos propios por color de GT52 (términos GT52M / GT52Y cargados el 2026-11-16; GT52C ya existía)")
+# Los compatibles GT52 tienen código propio por color (Modelo M-GT52C, M-GT52M, GT52Y) y solo el cian tenía su
+# término exacto. Es un dato deliberado: si alguien lo borra, estas aserciones fallan a propósito.
+for q, color in (('GT52C', 'Cyan'), ('GT52M', 'Magenta'), ('GT52Y', 'Amarillo'),
+                 ('GT52M magenta megatoner', 'Magenta'), ('GT52Y amarillo megatoner', 'Amarillo')):
+    r = bp(q)
+    check(f"«{q}» → 1 producto, {color}, Megatoner",
+          n_opciones(r) == 1 and color in r and 'Megatoner' in r and 'Original' not in r, r[:140])
+
 print("== Marcas de verdad y 664 (regresión)")
 r = bp('664 negra')
 check("«664 negra» → solo negros", n_opciones(r) >= 1 and all(c not in r for c in ('Cian', 'Amarillo', 'Magenta', 'Tricolor')) and 'Negro' in r, r[:160])

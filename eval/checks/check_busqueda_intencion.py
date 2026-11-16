@@ -138,7 +138,7 @@ r = brm('quiero 2 de 664 cian megatoner')
 linea = r.split('Qty')[0]
 check("«664 cian megatoner» deja la Cyan Megatoner (antes: la Magenta Original)",
       'Cyan' in linea and 'Megatoner' in linea and 'Magenta' not in linea, r[:170])
-r = brm('quiero 3 de 664 amarilla original')  # (con «x3» la herramienta lo toma por otra referencia: defecto aparte)
+r = brm('664 amarilla original x3')  # «x3» es cantidad (check_referencias_cantidad_x.py), ya no una 2.ª referencia
 linea = r.split('Qty')[0]
 check("«664 amarilla original» deja la amarilla Original",
       ('Amarillo' in linea or 'Yellow' in linea) and 'Original' in linea and 'Megatoner' not in linea, r[:170])

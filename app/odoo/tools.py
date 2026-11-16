@@ -2711,13 +2711,13 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 logger.warning(
                     "PRECIO $0: %d producto(s) ocultado(s) por calcular precio 0 en "
                     "pricelist=%s ref=%r ids=%s — revisar reglas de esa lista",
-        # Si el cliente nombró color y/o línea («GT52 amarillo megatoner»), se muestra ESE producto.
-        prods = _estrechar_por_intencion(prods, referencia)
                     len(prods) - len(_vendibles), _bot_pricelist_id, ref, _ocultos,
                 )
             if not _vendibles:
                 return [], [], ref, 'sin_precio_canal'
             prods = _vendibles
+        # Si el cliente nombró color y/o línea («GT52 amarillo megatoner»), se muestra ESE producto.
+        prods = _estrechar_por_intencion(prods, referencia)
         # ids solo incluye productos en stock (para envío de tarjetas)
         ids = [p["id"] for p in prods if p.get("en_stock")]
         return prods, ids, ref, busqueda_tipo
@@ -5364,7 +5364,12 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             r'|\d{3,}'
             r')\b'
         )
-        QTY_PAT = _re.compile(r'(?<![A-Za-z0-9])(\d{1,2})(?![A-Za-z0-9])')
+        # Cantidad: un número suelto de 1-2 dígitos («85A 3») o «xN» («85A x3», «85A x 10»). Antes «x2»/«x3»
+        # no contaba como cantidad Y además REF_PAT lo tomaba por una referencia (letra+dígito): devolvía
+        # `[PRODUCTO_NO_ENCONTRADO: X3]` con la instrucción de pasar el chat a un asesor, y el mensaje
+        # contaba como dos referencias. «Nx» ('83X', '05X', '10X'…) NO se toca: son referencias reales.
+        QTY_PAT = _re.compile(r'(?<![A-Za-z0-9])(?:[xX]\s?(\d{1,3})|(\d{1,2}))(?![A-Za-z0-9])')
+        _RE_X_CANTIDAD = _re.compile(r'[xX]\d{1,3}')
 
         # Referencia "corta" (ej. U4, M6, con <2 digitos): solo se busca en
         # terminos EXACTOS (=ilike sobre el string completo, sin riesgo de
@@ -5373,12 +5378,49 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         def _ref_es_corta(r):
             return len(_re.findall(r'\d', r)) < 2
 
-        ref_matches = list(REF_PAT.finditer(msg_clean))
+        ref_matches = []
+        for _m in REF_PAT.finditer(msg_clean):
+            # «x2» tras una referencia es SU cantidad, no otra referencia. Solo si ya hay una antes:
+            # existe un término real «X10», así que un «x10» a secas sigue siendo una referencia.
+            if ref_matches and _RE_X_CANTIDAD.fullmatch(_m.group(1)):
+                continue
+            ref_matches.append(_m)
         if not ref_matches:
             return (
                 "No detecte referencias de productos (minimo 3 digitos). "
                 "Indica la referencia exacta (ej: 85A, 664, CE285A)."
             )
+
+        # Asociar cantidad a cada referencia: buscar qty entre esta ref y la siguiente.
+        # Ademas clasificar cada referencia como repuesto o consumible segun el
+        # texto previo en el MENSAJE ORIGINAL (alli sobreviven 'toner', 'cilindro'...).
+        # El tipo de repuesto es pegajoso ("almohadilla L3210 y L220" → ambas)
+        # hasta que aparezca una palabra de consumible (toner/cartucho/tinta).
+        pairs = []
+        msg_low = mensaje.lower()
+        search_pos = 0
+        prev_end_orig = 0
+        sticky_tipo = None
+        for i, m in enumerate(ref_matches):
+            ref = m.group(1).upper()
+            seg_end = ref_matches[i + 1].start() if i + 1 < len(ref_matches) else len(msg_clean)
+            segment = msg_clean[m.end():seg_end]
+            qty_m = QTY_PAT.search(segment)
+            qty = int(qty_m.group(1) or qty_m.group(2)) if qty_m else 1
+            pos = msg_low.find(ref.lower(), search_pos)
+            if pos >= 0:
+                antes = mensaje[prev_end_orig:pos]
+                search_pos = pos + len(ref)
+                prev_end_orig = pos + len(ref)
+            else:
+                antes = ''
+            tipo_seg = _detectar_repuesto(antes)
+            if tipo_seg:
+                sticky_tipo = tipo_seg
+            elif _CARTUCHO_RE.search(antes):
+                sticky_tipo = None
+            pairs.append((ref, qty, sticky_tipo))
+
         def _estrechar_variantes(variantes, texto):
             """Con una sola referencia en el mensaje, deja solo la variante del color/línea pedidos.
 
@@ -5413,37 +5455,6 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             elegidas = _estrechar_por_intencion([d for _, d in anotadas], texto)
             vivos = {id(d) for d in elegidas}
             return [v for v, d in anotadas if id(d) in vivos] or variantes
-
-
-        # Asociar cantidad a cada referencia: buscar qty entre esta ref y la siguiente.
-        # Ademas clasificar cada referencia como repuesto o consumible segun el
-        # texto previo en el MENSAJE ORIGINAL (alli sobreviven 'toner', 'cilindro'...).
-        # El tipo de repuesto es pegajoso ("almohadilla L3210 y L220" → ambas)
-        # hasta que aparezca una palabra de consumible (toner/cartucho/tinta).
-        pairs = []
-        msg_low = mensaje.lower()
-        search_pos = 0
-        prev_end_orig = 0
-        sticky_tipo = None
-        for i, m in enumerate(ref_matches):
-            ref = m.group(1).upper()
-            seg_end = ref_matches[i + 1].start() if i + 1 < len(ref_matches) else len(msg_clean)
-            segment = msg_clean[m.end():seg_end]
-            qty_m = QTY_PAT.search(segment)
-            qty = int(qty_m.group(1)) if qty_m else 1
-            pos = msg_low.find(ref.lower(), search_pos)
-            if pos >= 0:
-                antes = mensaje[prev_end_orig:pos]
-                search_pos = pos + len(ref)
-                prev_end_orig = pos + len(ref)
-            else:
-                antes = ''
-            tipo_seg = _detectar_repuesto(antes)
-            if tipo_seg:
-                sticky_tipo = tipo_seg
-            elif _CARTUCHO_RE.search(antes):
-                sticky_tipo = None
-            pairs.append((ref, qty, sticky_tipo))
 
         # Puntaje de ventas globales para ordenar cuando hay multiples resultados
         def _get_scores(product_ids):
@@ -5557,9 +5568,6 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                     if tmpl_ids:
                         confidence = "exacta" if _modo_f == 'exacta' and _paso != 'nombre' else "similar"
 
-            if len(pairs) == 1 and len(prods) > 1:
-                prods = _estrechar_variantes(prods, mensaje)
-
             # Registrar el término como «no encontrado» SOLO si ninguna fuente lo resolvió (antes se
             # registraba antes de buscar por similitud y la lista se llenaba de productos que sí existen).
             if not tmpl_ids and not _ref_es_corta(ref) and ch_id and _bot_id:
@@ -5590,6 +5598,9 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             if not prods:
                 not_found_refs.append(ref)
                 continue
+
+            if len(pairs) == 1 and len(prods) > 1:
+                prods = _estrechar_variantes(prods, mensaje)
 
             # Ordenar por ventas globales
             prod_ids = [p["id"] for p in prods]

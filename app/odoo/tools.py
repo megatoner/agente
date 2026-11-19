@@ -333,6 +333,57 @@ AVISO_PDF_DESDE_LINK = (
 )
 
 
+_FAQ_PALABRAS_VACIAS = {
+    "de", "del", "la", "las", "el", "los", "un", "una", "unos", "unas", "y", "o", "en", "para", "por",
+    "con", "que", "al", "mi", "su", "sus", "se", "me", "es", "cual", "cuales", "como", "donde", "cuando",
+    "hay", "tiene", "tienen", "sobre", "info", "informacion",
+}
+
+
+def _faq_norm(texto) -> str:
+    """Minúsculas y sin tildes: «consignación» y «consignacion» son lo mismo."""
+    import unicodedata
+    base = unicodedata.normalize("NFD", str(texto or "").lower())
+    return "".join(c for c in base if unicodedata.category(c) != "Mn")
+
+
+def _faqs_por_palabras(faqs, tema, bot_id=None, limite=3):
+    """Respaldo de `consultar_faq`: FAQs que coinciden por PALABRAS, de mejor a peor.
+
+    `consultar_faq` busca `pregunta ilike tema` con la frase ENTERA, pero `pregunta` es una lista
+    de palabras clave («consignación, datos bancarios, cuenta bancaria, …»): «datos bancarios»
+    aparece en ella y «datos bancarios transferencia» no, así que según la frase que escribiera el
+    modelo la FAQ existía o no. Caso CONCEPCION CECILIA ESPINAL MAZO (573205726837, 2026-11-19):
+    pidió pagar por transferencia, el agente buscó tres frases distintas, ninguna calzó, y escaló
+    teniendo la FAQ de datos bancarios activa (9 fallos iguales desde el 12-nov).
+
+    Puntúa por palabra del tema (sin tildes, ignorando artículos y preposiciones): una palabra en
+    `pregunta` vale 2 y en `respuesta` vale 1. Se acepta si alguna palabra está en `pregunta`, o si
+    en `respuesta` coinciden al menos min(2, nº de palabras) — así «transferencia» a secas llega a
+    la FAQ de datos bancarios aunque esa palabra solo esté en el texto. Ante igual puntaje gana la
+    FAQ propia del bot sobre la global, y luego la de menor `sequence`.
+    """
+    import re as _re
+    palabras = []
+    for w in _re.findall(r"[a-z0-9]+", _faq_norm(tema)):
+        if len(w) >= 3 and w not in _FAQ_PALABRAS_VACIAS and w not in palabras:
+            palabras.append(w)
+    if not palabras:
+        return []
+    candidatas = []
+    for f in faqs or []:
+        p, r = _faq_norm(f.get("pregunta")), _faq_norm(f.get("respuesta"))
+        en_p = sum(1 for w in palabras if w in p)
+        en_r = sum(1 for w in palabras if w in r)
+        if en_p == 0 and en_r < min(2, len(palabras)):
+            continue
+        bot = f.get("bot_id")
+        propia = 1 if (bot_id and bot and (bot[0] if isinstance(bot, (list, tuple)) else bot) == bot_id) else 0
+        candidatas.append((2 * en_p + en_r, propia, -(f.get("sequence") or 0), f))
+    candidatas.sort(key=lambda c: c[:3], reverse=True)
+    return [c[3] for c in candidatas[:limite]]
+
+
 def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
     """Factory that creates all JPC Odoo tools."""
     odoo = get_odoo_client()
@@ -1001,6 +1052,21 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                     [("active", "=", True), ("pregunta", "ilike", tema), ("bot_id", "=", False)],
                     campos, limit=3,
                 )
+            if not faqs:
+                # Respaldo por palabras (ver _faqs_por_palabras): la búsqueda de arriba exige la frase
+                # entera dentro de la lista de palabras clave de la FAQ y fallaba según cómo la escribiera
+                # el modelo. Solo corre si lo anterior no encontró nada: lo que hoy funciona no cambia.
+                if bot_id:
+                    dom_c = [("active", "=", True), ("bot_id", "=", bot_id)] if _faq_solo_propias else [
+                        ("active", "=", True), ("bot_id", "in", [bot_id, False])]
+                else:
+                    dom_c = [("active", "=", True)]
+                candidatas = odoo.search_read(
+                    "jpc.whatsapp.bot.faq", dom_c, campos + ["sequence"], limit=300)
+                faqs = _faqs_por_palabras(candidatas, tema, bot_id=bot_id)
+                if faqs:
+                    logger.info("consultar_faq: respaldo por palabras tema=%r → faq %s",
+                                tema, [f.get("id") for f in faqs])
             if not faqs:
                 return f"No encontré información sobre '{tema}'. Escala al asesor si es urgente."
 

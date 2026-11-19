@@ -26,6 +26,16 @@ from app.odoo import fabricante_impresoras as fab
 logger = logging.getLogger(__name__)
 
 MODELO_IA = fab.MODELO_IA
+_RE_MODELO = re.compile(r"claude-[a-z0-9][a-z0-9.\-]{1,60}")
+
+
+def modelo_valido(modelo) -> Optional[str]:
+    """El modelo que pide Odoo, o None para usar el predeterminado (Haiku).
+
+    Solo modelos Claude: la búsqueda web que usa el agente es la herramienta de Anthropic. Un valor
+    raro (otro proveedor, texto libre) se ignora en vez de romper la investigación."""
+    m = (modelo or "").strip().lower()
+    return m if _RE_MODELO.fullmatch(m) else None
 _MAX_EXTRACTOS = 14000
 
 
@@ -117,10 +127,10 @@ def armar_informe(termino: str, marca: Optional[str], citas: List[Dict[str, str]
 
 # ───────────────────────── búsqueda y extracción (con red) ─────────────────────────
 
-def _buscar_abierta(termino: str, marca: Optional[str]) -> List[Dict[str, str]]:
+def _buscar_abierta(termino: str, marca: Optional[str], modelo: Optional[str] = None) -> List[Dict[str, str]]:
     """Búsqueda sin restricción de dominio: fichas y tiendas de cartuchos compatibles."""
     r = fab._cliente_anthropic().messages.create(
-        model=MODELO_IA, max_tokens=2500, thinking={"type": "disabled"},
+        model=modelo or MODELO_IA, max_tokens=2500, thinking={"type": "disabled"},
         tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 4,
                 "blocked_domains": ["pinterest.com", "facebook.com", "youtube.com", "tiktok.com"]}],
         messages=[{"role": "user", "content": (
@@ -156,30 +166,32 @@ _PROMPT = (
 )
 
 
-def _extraer(termino: str, citas: List[Dict[str, str]], sugerido: str = "") -> Dict[str, Any]:
+def _extraer(termino: str, citas: List[Dict[str, str]], sugerido: str = "",
+             modelo: Optional[str] = None) -> Dict[str, Any]:
     extractos = "\n\n".join(
         f"[{c['url']}] {c['title']}\n{c['cited_text']}" for c in citas)[:_MAX_EXTRACTOS]
     pedido = f"Término buscado por el cliente: {termino}\n"
     if sugerido:
         pedido += f"Producto sugerido por nuestro catálogo: {sugerido}\n"
     r = fab._cliente_anthropic().messages.create(
-        model=MODELO_IA, max_tokens=1500, thinking={"type": "disabled"}, system=_PROMPT,
+        model=modelo or MODELO_IA, max_tokens=1500, thinking={"type": "disabled"}, system=_PROMPT,
         messages=[{"role": "user", "content": f"{pedido}\nEXTRACTOS:\n{extractos}"}])
     raw = "".join(b.text for b in r.content if getattr(b, "type", "") == "text")
     m = re.search(r"\{.*\}", raw, re.S)
     return json.loads(m.group(0)) if m else {}
 
 
-def investigar(termino: str, producto_sugerido: str = "") -> Dict[str, Any]:
+def investigar(termino: str, producto_sugerido: str = "", modelo: str = "") -> Dict[str, Any]:
     """Punto de entrada. Devuelve el informe de `armar_informe`; NUNCA lanza."""
     try:
         termino = (termino or "").strip()
         if len(termino) < 2:
             return {"ok": False, "confianza": "ninguna", "motivo": "termino_vacio"}
+        modelo = modelo_valido(modelo)
         marca = fab.detectar_marca(termino)
         with ThreadPoolExecutor(max_workers=2) as pool:
-            f_fab = pool.submit(fab.consultar_fabricante, termino) if fab.parece_impresora(termino) else None
-            f_abierta = pool.submit(_buscar_abierta, termino, marca)
+            f_fab = pool.submit(fab.consultar_fabricante, termino, modelo) if fab.parece_impresora(termino) else None
+            f_abierta = pool.submit(_buscar_abierta, termino, marca, modelo)
             try:
                 respaldo = f_fab.result() if f_fab else None
             except Exception as e:
@@ -192,7 +204,8 @@ def investigar(termino: str, producto_sugerido: str = "") -> Dict[str, Any]:
                 citas = []
         if not citas:
             return {"ok": False, "confianza": "ninguna", "motivo": "sin_resultados"}
-        informe = armar_informe(termino, marca, citas, _extraer(termino, citas, producto_sugerido), respaldo)
+        informe = armar_informe(termino, marca, citas, _extraer(termino, citas, producto_sugerido, modelo), respaldo)
+        informe["modelo"] = modelo or MODELO_IA
         logger.info("investigar '%s': confianza=%s oem=%s equiv=%s", termino, informe["confianza"],
                     informe["codigos_oem"], informe["equivalentes"])
         return informe

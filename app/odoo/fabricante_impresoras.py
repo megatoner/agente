@@ -296,10 +296,11 @@ _ENFOQUES = {
 }
 
 
-def _buscar_citas(texto: str, marca: Optional[str], enfoque: str = "estandar") -> List[Dict[str, str]]:
+def _buscar_citas(texto: str, marca: Optional[str], enfoque: str = "estandar",
+                  modelo: Optional[str] = None) -> List[Dict[str, str]]:
     dominios = DOMINIOS.get(marca) if marca else sorted({d for v in DOMINIOS.values() for d in v})
     r = _cliente_anthropic().messages.create(
-        model=MODELO_IA, max_tokens=2500, thinking={"type": "disabled"},
+        model=modelo or MODELO_IA, max_tokens=2500, thinking={"type": "disabled"},
         tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3,
                 "allowed_domains": dominios}],
         messages=[{"role": "user", "content": (
@@ -328,17 +329,17 @@ _PROMPT_EXTRACCION = (
 )
 
 
-def _extraer(texto: str, citas: List[Dict[str, str]]) -> Dict[str, Any]:
+def _extraer(texto: str, citas: List[Dict[str, str]], modelo: Optional[str] = None) -> Dict[str, Any]:
     extractos = "\n\n".join(f"[{c['url']}] {c['title']}\n{c['cited_text']}" for c in citas)[:12000]
     r = _cliente_anthropic().messages.create(
-        model=MODELO_IA, max_tokens=1500, thinking={"type": "disabled"}, system=_PROMPT_EXTRACCION,
+        model=modelo or MODELO_IA, max_tokens=1500, thinking={"type": "disabled"}, system=_PROMPT_EXTRACCION,
         messages=[{"role": "user", "content": f"Impresora pedida: {texto}\n\nEXTRACTOS:\n{extractos}"}])
     raw = "".join(b.text for b in r.content if getattr(b, "type", "") == "text")
     m = re.search(r"\{.*\}", raw, re.S)
     return json.loads(m.group(0)) if m else {}
 
 
-def consultar_fabricante(texto: str) -> Dict[str, Any]:
+def consultar_fabricante(texto: str, modelo: Optional[str] = None) -> Dict[str, Any]:
     """Búsqueda restringida al fabricante + verificación. No escribe nada."""
     marca = detectar_marca(texto)
     citas: List[Dict[str, str]] = []
@@ -346,7 +347,7 @@ def consultar_fabricante(texto: str) -> Dict[str, Any]:
     # suele traer solo 58A y dejar fuera 58X, que también le sirve a la impresora.
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=2) as pool:
-        futuros = [pool.submit(_buscar_citas, texto, marca, e) for e in ("estandar", "alto_rendimiento")]
+        futuros = [pool.submit(_buscar_citas, texto, marca, e, modelo) for e in ("estandar", "alto_rendimiento")]
         for f in futuros:
             try:
                 citas += f.result()
@@ -354,7 +355,7 @@ def consultar_fabricante(texto: str) -> Dict[str, Any]:
                 logger.warning("consultar_fabricante búsqueda: %s", e)
     if not citas:
         return {"ok": False, "motivo": "sin_resultados"}
-    return verificar(texto, marca or "", citas, _extraer(texto, citas))
+    return verificar(texto, marca or "", citas, _extraer(texto, citas, modelo))
 
 
 # ───────────────────────── orquestación ─────────────────────────

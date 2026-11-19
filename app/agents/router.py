@@ -52,7 +52,8 @@ def investigar_termino_endpoint(
 ):
     """Investiga en internet a qué cartucho corresponde un término. Solo lee; no escribe en Odoo."""
     from app.odoo.investigar_termino import investigar
-    return investigar(str(req.get("termino") or ""), str(req.get("producto_sugerido") or ""))
+    return investigar(str(req.get("termino") or ""), str(req.get("producto_sugerido") or ""),
+                      str(req.get("modelo") or ""))
 
 
 @router.post("/run", response_model=RunResponse)

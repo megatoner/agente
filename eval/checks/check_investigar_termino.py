@@ -8,7 +8,7 @@ tiendas/compatibles es «terceros»; (3) sin evidencia, confianza «ninguna».
 """
 import sys
 sys.path.insert(0, '/opt/odoo-agents')
-from app.odoo.investigar_termino import armar_informe  # noqa: E402
+from app.odoo.investigar_termino import armar_informe, modelo_valido  # noqa: E402
 
 ok, fail = [], []
 
@@ -61,6 +61,13 @@ check("respalda_sugerido solo booleano", armar_informe("x", None, [TIENDA], {"eq
 check("respalda_sugerido True se conserva", armar_informe("x", None, [TIENDA], {"equivalentes": ["CF283X"],
       "respalda_sugerido": True})["respalda_sugerido"] is True)
 check("extraído None no revienta", armar_informe("x", None, [TIENDA], None)["confianza"] == "ninguna")
+
+print("Modelo elegido desde Odoo")
+check("claude-sonnet-5-5 es válido", modelo_valido("claude-sonnet-5-5") == "claude-sonnet-5-5")
+check("mayúsculas y espacios se normalizan", modelo_valido("  Claude-Haiku-5-5 ") == "claude-haiku-5-5")
+check("vacío → None (usa Haiku)", modelo_valido("") is None and modelo_valido(None) is None)
+check("otro proveedor se ignora", modelo_valido("gpt-4o") is None and modelo_valido("gemini-2.0-flash") is None)
+check("texto raro / inyección se ignora", modelo_valido("claude-x; rm -rf /") is None and modelo_valido("claude-") is None)
 
 print(f"\n{len(ok)} OK, {len(fail)} FALLAN")
 sys.exit(1 if fail else 0)

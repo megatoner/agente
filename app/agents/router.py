@@ -45,6 +45,16 @@ def execute_agent(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/investigar-termino")
+def investigar_termino_endpoint(
+    req: Dict[str, Any],
+    api_key: str = Depends(verify_api_key)
+):
+    """Investiga en internet a qué cartucho corresponde un término. Solo lee; no escribe en Odoo."""
+    from app.odoo.investigar_termino import investigar
+    return investigar(str(req.get("termino") or ""), str(req.get("producto_sugerido") or ""))
+
+
 @router.post("/run", response_model=RunResponse)
 def run_agent_endpoint(
     req: RunRequest,

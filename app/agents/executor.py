@@ -750,7 +750,11 @@ def run_agent(
         for _l in _human_quote.get("lines") or []:
             _hq_block += (
                 f"  • {_l.get('product_name', '')} × {_l.get('qty', 0):.0f} = "
-                f"${_l.get('price_subtotal', 0):,.0f}\n"
+                # Con IVA (price_total), igual que el Total: price_subtotal es la base
+                # sin IVA y MIA la daba como precio (caso S66705, EFISERVIS). Si el
+                # puente no manda price_total se omite el precio en vez de darlo sin IVA.
+                + (f"${_l['price_total']:,.0f} (IVA incluido)\n" if _l.get("price_total") is not None
+                   else "(precio: ver obtener_cotizacion)\n")
             )
         _hq_block += (
             "IMPORTANTE: esta cotización la armó un asesor y sigue abierta (sin confirmar). "

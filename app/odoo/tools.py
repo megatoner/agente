@@ -5801,8 +5801,16 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 limit=10,
                 context=_wh_ctx if _warehouse_id else None,
             )
+            _agotado = False
             if _warehouse_id:
-                prods = [p for p in prods if (p.get("qty_available") or 0) > 0]
+                _en_stock = [p for p in prods if (p.get("qty_available") or 0) > 0]
+                if _en_stock:
+                    prods = _en_stock
+                elif prods:
+                    # Existe y está publicado, pero sin stock en el almacén del bot: es AGOTADO, no
+                    # «no encontrado». Antes se descartaba y la herramienta mandaba a escalar como si
+                    # el producto no existiera (caso Majo Taborda, 2026-11-22: HP 667 Negro, stock 0).
+                    _agotado = True
 
             if not prods:
                 not_found_refs.append(ref)
@@ -5829,8 +5837,8 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 if tmpls else best.get("default_code", str(best["id"]))
             )
 
-            # Registrar en carrito
-            if ch_id:
+            # Registrar en carrito (un producto agotado NO se registra: no se cotiza)
+            if ch_id and not _agotado:
                 _upsert_carrito_linea(
                     product_id=best["id"],
                     product_name=display_name,
@@ -5870,6 +5878,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 "product_name": display_name,
                 "confidence": confidence,
                 "qty_available": best.get("qty_available", 0),
+                "agotado": _agotado,
             })
 
         # Notificar al asesor los no encontrados (incluye repuestos sin match)
@@ -5898,12 +5907,28 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         # Construir respuesta
         lines = []
         conf_icon = {"exacta": "✅", "similar": "⚠️ similar", "numero": "⚠️ aprox."}
+        hay_agotados = False
         for r in results:
             icon = conf_icon.get(r["confidence"], "")
+            if r.get("agotado"):
+                icon = "❌ AGOTADO (no cotizar)"
+                hay_agotados = True
             stock = f"Stock:{r['qty_available']:.0f}" if r.get("qty_available") is not None else ""
             lines.append(
                 f"PRODUCT_ID:{r['product_id']} | {r['product_name']} "
                 f"| Qty:{r['qty']} | {icon} | {stock}"
+            )
+        if hay_agotados:
+            _mensaje_agotado, _escalar_agotado = _obtener_respuesta_producto(
+                'agotado_busqueda', mensaje,
+                default_mensaje="Ese producto está agotado en este momento 😕 En cuanto tengamos disponibilidad te aviso.",
+                default_escalar=False,
+            )
+            lines.append(
+                f"Para los productos ❌ AGOTADO, dile al cliente algo como: '{_mensaje_agotado}'. "
+                "No des precio ni lo cotices."
+                + (" Luego usa escalar_a_asesor con motivo 'Producto agotado'." if _escalar_agotado
+                   else " NO escales solo por esto.")
             )
         for ref in not_found_refs:
             lines.append(

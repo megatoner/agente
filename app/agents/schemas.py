@@ -52,6 +52,7 @@ class RunResponse(BaseModel):
     session_id: Optional[str] = None
     model_used: str
     tools_used: List[str] = Field(default_factory=list)
+    tool_calls: List[Dict[str, Any]] = Field(default_factory=list)
     iterations: int = 0
     usage: Optional[Dict[str, Any]] = None
     success: bool = True

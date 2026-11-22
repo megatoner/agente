@@ -227,6 +227,35 @@ def _get_anthropic_tools(tools: list) -> list:
     return result
 
 
+_TRAZA_ARGS_MAX = 2000
+_TRAZA_RESULT_MAX = 4000
+
+
+def _anotar_traza(usage: dict, tool_name: str, tool_args, result) -> None:
+    """Guarda en usage['_tool_trace'] qué se le pidió a cada herramienta y qué devolvió.
+
+    Existe porque, sin esto, un «no encontré el producto» no se puede diagnosticar:
+    el log INFO del servicio no sale y la tabla de mensajes tenía vacíos los argumentos
+    y el resultado (caso J / CO.4623445871219765, 2026-11-21). La telemetría nunca puede
+    tumbar una conversación: cualquier fallo aquí se ignora.
+    """
+    try:
+        import json as _j
+        try:
+            args_txt = _j.dumps(tool_args, ensure_ascii=False, default=str)
+        except Exception:
+            args_txt = str(tool_args)
+        res_txt = str(result)
+        usage.setdefault("_tool_trace", []).append({
+            "name": tool_name,
+            "args": args_txt[:_TRAZA_ARGS_MAX],
+            "result": res_txt[:_TRAZA_RESULT_MAX],
+            "result_len": len(res_txt),
+        })
+    except Exception:
+        pass
+
+
 def _run_with_anthropic_client(
     llm_obj,
     model_name: str,
@@ -399,6 +428,7 @@ def _run_with_anthropic_client(
                 logger.warning("run_agent anthropic: session=%s tool=%s NOT FOUND", session_id, tool_name)
 
             _tool_results_text += str(result) + "\n"
+            _anotar_traza(usage, tool_name, tool_args, result)
 
             tool_results.append({
                 "type": "tool_result",
@@ -547,6 +577,7 @@ def _run_with_openai_client(
                 logger.warning("run_agent: session=%s tool=%s NOT FOUND", session_id, tool_name)
 
             _tool_results_text += str(result) + "\n"
+            _anotar_traza(usage, tool_name, tool_args, result)
 
             messages.append({
                 "role": "tool",
@@ -1046,11 +1077,15 @@ def run_agent(
     except Exception:
         logger.debug("eval capture: ignorado", exc_info=True)
 
+    # La traza viaja aparte de usage (que solo lleva contadores de tokens).
+    tool_calls = usage.pop("_tool_trace", []) if isinstance(usage, dict) else []
+
     return {
         "output": output,
         "session_id": session_id,
         "model_used": llm_model or "default",
         "tools_used": tools_used,
+        "tool_calls": tool_calls,
         "iterations": iterations,
         "usage": usage,
         "success": True,

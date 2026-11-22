@@ -40,7 +40,9 @@ def check(n, c, d=''):
 
 
 HOGAR = call('product.category', 'search', [['name', '=', 'Linea Hogar']], limit=1)[0]
-cli = call('res.partner', 'create', {'name': 'E2E CATALOGO RESTRINGIDO', 'company_type': 'company'})
+# Reutiliza la ficha (activa o archivada): una regla de duplicados impide crear otra con el mismo nombre.
+cli = (call('res.partner', 'search', [['name', '=', 'E2E CATALOGO RESTRINGIDO'], ['active', 'in', [True, False]]], limit=1)
+       or [call('res.partner', 'create', {'name': 'E2E CATALOGO RESTRINGIDO', 'company_type': 'company'})])[0]
 toner = call('product.product', 'search',
              [['categ_id.complete_name', 'ilike', 'Cartucho Laser'], ['is_published', '=', True]], limit=1)[0]
 blizka_wh = 1

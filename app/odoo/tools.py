@@ -169,6 +169,10 @@ def _colores_de(prod):
     return _colores_en(prod.get('color_attr')) or _colores_en(prod.get('name'))
 
 
+# Modo del catálogo restringido por bot: {(categ_ids): (es_simple, hora)}. Ver `_catalogo_simple`.
+_CATALOGO_SIMPLE_CACHE = {}
+
+
 def _estrechar_por_intencion(prods, texto):
     """Deja solo los productos que coinciden con el color y la línea que el cliente nombró.
 
@@ -426,6 +430,21 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
     # categorías, SOLO se buscan/cotizan productos dentro de ellas (child_of). Vacío =
     # sin restricción (Megatoner: comportamiento idéntico al de siempre).
     _bot_categ_ids = [int(c) for c in ((odoo_context or {}).get("bot_categ_ids") or []) if c]
+    # Sitio web del catálogo (2026-11-22): manda sobre las categorías. El bot solo ofrece lo que se
+    # vende en ese sitio ("Sitio web" / "Se vende en los sitios" del producto) y, a diferencia de la
+    # web, lo SIN asignar no entra. Sin sitio ni categorías = sin restricción (Megatoner clásico).
+    _bot_website_id = int((odoo_context or {}).get("bot_website_id") or 0)
+    _bot_restringido = bool(_bot_website_id or _bot_categ_ids)
+
+    def _dom_catalogo(prefijo=""):
+        """Dominio del catálogo del bot sobre product.template (prefijo='') o product.product
+        (prefijo='product_tmpl_id.'). Una sola definición para todos los candados."""
+        if _bot_website_id:
+            return ["|", (prefijo + "website_id", "=", _bot_website_id),
+                    (prefijo + "jpc_website_ids", "in", [_bot_website_id])]
+        if _bot_categ_ids:
+            return [(prefijo + "categ_id", "child_of", _bot_categ_ids)]
+        return []
     # URL base de los enlaces de producto de este bot (default: Megatoner).
     _bot_site_url = (
         str((odoo_context or {}).get("bot_site_url") or "").strip().rstrip("/")
@@ -2044,7 +2063,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             return []
         rows = odoo.search_read(
             "product.template",
-            [("categ_id", "child_of", _bot_categ_ids), ("active", "=", True),
+            [*_dom_catalogo(), ("active", "=", True),
              ("is_published", "=", True)],
             ["id", "name", "jpc_pos_name", "categ_id"],
             limit=300,
@@ -2061,15 +2080,62 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         best = max(h for h, _ in scored)
         return [i for h, i in sorted(scored, key=lambda x: (-x[0], x[1])) if h == best][:8]
 
+    def _catalogo_simple():
+        """True = catálogo SIN términos de búsqueda (Blizka: colchones, almohadas...): se busca por
+        nombre/categoría y se responde con el formato de catálogo. False = el bot no restringe, o
+        sus categorías tienen productos con términos de búsqueda (cartuchos): se usa el motor normal
+        (códigos, términos, atributos) y las categorías actúan solo como CANDADO sobre el resultado.
+
+        Caso real Majo Taborda (573235909230, 2026-11-22): el bot Usuario Final se
+        restringió a cartuchos, tintas, cintas e impresoras; la búsqueda por nombre descartaba los
+        números («667», «3635») y las palabras de <3 letras («HP»), así que «no encontró» el HP 667
+        ni el 150A, que sí existen y están en esas categorías. Ante cualquier error al decidirlo se
+        usa el comportamiento de siempre (simple), que es el más conservador.
+        """
+        if not _bot_restringido:
+            return False
+        import time as _t
+        clave = (_bot_website_id, tuple(sorted(_bot_categ_ids)))
+        hit = _CATALOGO_SIMPLE_CACHE.get(clave)
+        if hit and _t.time() - hit[1] < 600:
+            return hit[0]
+        try:
+            con_terminos = bool(odoo.search_read(
+                "product.template",
+                [*_dom_catalogo(), ("active", "=", True),
+                 ("jpc_search_exact_ids", "!=", False)],
+                ["id"], limit=1,
+            ))
+        except Exception as e:
+            logger.warning("_catalogo_simple: no se pudo decidir (%s); se usa el modo simple", e)
+            return True
+        _CATALOGO_SIMPLE_CACHE[clave] = (not con_terminos, _t.time())
+        return not con_terminos
+
+    def _filtrar_por_categorias_bot(prods):
+        """Deja solo los productos dentro de las categorías del bot (y sus hijas). Falla CERRADO."""
+        if not prods or not _bot_restringido:
+            return prods
+        try:
+            ok = {r["id"] for r in odoo.search_read(
+                "product.product",
+                [("id", "in", [p["id"] for p in prods]), *_dom_catalogo("product_tmpl_id.")],
+                ["id"], limit=len(prods),
+            )}
+        except Exception as e:
+            logger.warning("_filtrar_por_categorias_bot: %s", e)
+            return []
+        return [p for p in prods if p["id"] in ok]
+
     def _producto_permitido(product_id):
         """True si el producto está en las categorías del bot (o el bot no restringe).
         Falla CERRADO: ante un error de lectura no se deja pasar."""
-        if not _bot_categ_ids:
+        if not _bot_restringido:
             return True
         try:
             return bool(odoo.search_read(
                 "product.product",
-                [("id", "=", int(product_id)), ("categ_id", "child_of", _bot_categ_ids)],
+                [("id", "=", int(product_id)), *_dom_catalogo("product_tmpl_id.")],
                 ["id"], limit=1,
             ))
         except Exception as e:
@@ -2237,12 +2303,24 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         no se escribe nada y el resultado es el de siempre. No aplica a bots con catálogo
         restringido (Blizka: no vende cartuchos).
         """
-        res = _buscar_producto_core_base(referencia)
-        if res[0] or res[3] != 'ninguna' or _bot_categ_ids:
+        def _con_candado(res):
+            """Bot con categorías y catálogo de cartuchos: el motor normal busca y las categorías
+            solo dejan pasar lo suyo (nunca se muestra ni se cotiza lo de fuera)."""
+            if _bot_restringido and res[0] and not _catalogo_simple():
+                prods = _filtrar_por_categorias_bot(res[0])
+                if len(prods) != len(res[0]):
+                    logger.info("_buscar_producto_core: candado por categoría %d→%d ref=%r",
+                                len(res[0]), len(prods), referencia)
+                    return (prods, [p["id"] for p in prods if p.get("en_stock")],
+                            res[2], res[3] if prods else 'ninguna')
+            return res
+
+        res = _con_candado(_buscar_producto_core_base(referencia))
+        if res[0] or res[3] != 'ninguna' or _catalogo_simple():
             return res
         from app.odoo import fabricante_impresoras as _fab
         if _fab.aprender_impresora(odoo, referencia, ch_id, _bot_id).get('aprendido'):
-            return _buscar_producto_core_base(referencia)
+            return _con_candado(_buscar_producto_core_base(referencia))
         return res
 
     def _buscar_producto_core_base(referencia: str):
@@ -2387,7 +2465,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
         # Bot con catálogo restringido por categoría (Blizka): búsqueda propia por
         # nombre/categoría y SALIDA TEMPRANA — las fases de abajo son de impresoras.
-        if _bot_categ_ids:
+        if _bot_restringido and _catalogo_simple():
             _t_ids = _catalogo_categorias_buscar(referencia)
             # El stock SÍ se respeta (por variante/medida, en el almacén del bot):
             # _tmpl_to_prods ya marca en_stock según qty_available con _wh_ctx.
@@ -2969,7 +3047,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         textualmente.
         """
         prods, ids, ref, busqueda_tipo = _buscar_producto_core(referencia)
-        if not prods and _bot_categ_ids and busqueda_tipo == 'ninguna':
+        if not prods and _bot_restringido and _catalogo_simple() and busqueda_tipo == 'ninguna':
             return (
                 f"No encontré '{referencia}' en el catálogo de este bot. "
                 "Dile al cliente que no lo encuentras con ese nombre y pregúntale qué "
@@ -3019,7 +3097,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 )
             )
         logger.info("buscar_producto: '%s' -> IDs=%s", ref, ids)
-        if _bot_categ_ids:
+        if _bot_restringido and _catalogo_simple():
             return _formato_catalogo(ref, prods)
         # Resumen de variantes: mixto (Megatoner+Original) -> todo junto en secciones
         _meg_prods = [p for p in prods if _es_megatoner(p)]
@@ -5455,7 +5533,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
 
         if not mensaje or not mensaje.strip():
             return "Indica la referencia del producto que necesitas (ej: 85A, 664, CE285A)."
-        if _bot_categ_ids:
+        if _bot_restringido and _catalogo_simple():
             return _referencias_catalogo(mensaje)
 
         # Limpiar modificadores genericos del mensaje
@@ -5711,9 +5789,14 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 continue
 
             # Resolver product.product desde templates
+            _dom_prods = [("product_tmpl_id", "in", tmpl_ids), ("active", "=", True), ("is_published", "=", True)]
+            if _bot_restringido:
+                # Candado del catálogo (sitio o categorías): aquí solo llegan bots con catálogo de
+                # cartuchos (los de catálogo simple salieron antes por `_referencias_catalogo`).
+                _dom_prods += _dom_catalogo("product_tmpl_id.")
             prods = odoo.search_read(
                 "product.product",
-                [("product_tmpl_id", "in", tmpl_ids), ("active", "=", True), ("is_published", "=", True)],
+                _dom_prods,
                 ["id", "default_code", "qty_available", "product_tmpl_id"],
                 limit=10,
                 context=_wh_ctx if _warehouse_id else None,

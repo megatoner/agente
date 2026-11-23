@@ -412,6 +412,19 @@ def _numeros_en_palabras(texto):
         t, flags=_r.IGNORECASE)
     t = _r.sub(r'\bdocena\b', '12', t, flags=_r.IGNORECASE)
 
+    # «caja» sin número = UNA caja: «caja de 105x», «caja 105x», «105x por caja». Solo si va con una
+    # referencia (token con dígito) y si no hay ya una cantidad delante («2 caja», «una caja», «media caja»).
+    def _caja_sola(m):
+        previo = t[:m.start()].rstrip().rsplit(None, 1)
+        if previo and (previo[-1].isdigit() or previo[-1].lower() in _PALABRAS_NUM or previo[-1].lower() == 'media'):
+            return m.group(0)
+        return '1 ' + m.group(0)
+
+    t = _r.sub(
+        r'\bcaja\b(?=\s+(?:(?:de|del)\s+)?(?:(?:tintas?|cartuchos?|toners?|t[oó]ners?)\s+)?(?:\w*\d\w*))',
+        _caja_sola, t, flags=_r.IGNORECASE)
+    t = _r.sub(r'(\S*\d\S*)\s+(?:por|x|en|la)\s+caja\b', r'\1 1 caja', t, flags=_r.IGNORECASE)
+
     def _post(m):
         previo, pal, resto = m.group(1), m.group(2).lower(), m.group(3)
         if not _r.search(r'\d', previo):
@@ -6043,7 +6056,10 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 f"| Qty:{r['qty']} | {icon} | {stock}"
             )
             if r.get("cajas") and not r.get("sin_caja"):
-                lines.append(f"  ↳ {r['cajas']} caja(s) = {r['qty']} unidades (según la caja del producto).")
+                lines.append(
+                    f"  ↳ {r['cajas']} caja(s) = {r['qty']} unidades (según la caja del producto). Para el PRECIO usa "
+                    f"obtener_precio(product_id, partner_id, qty={r['qty']}) con ESA cantidad: la tarifa por caja puede "
+                    "ser menor que la unitaria; NO multipliques el precio unitario.")
             elif r.get("sin_caja"):
                 lines.append(
                     f"  ↳ El cliente pidió {r['cajas']} caja(s) pero este producto NO tiene cantidad por caja "

@@ -388,6 +388,43 @@ def _faqs_por_palabras(faqs, tema, bot_id=None, limite=3):
     return [c[3] for c in candidatas[:limite]]
 
 
+_PALABRAS_NUM = {
+    'un': 1, 'uno': 1, 'una': 1, 'dos': 2, 'tres': 3, 'cuatro': 4, 'cinco': 5, 'seis': 6,
+    'siete': 7, 'ocho': 8, 'nueve': 9, 'diez': 10, 'once': 11, 'doce': 12,
+}
+_ALT_NUM = 'dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce'
+
+
+def _numeros_en_palabras(texto):
+    """Docenas y cantidades en palabras que van DESPUÉS de una referencia → dígitos.
+
+    «media docena» → 6, «una docena»/«docena» → 12, «dos docenas» → 24, y «664 dos» → «664 2».
+    Una palabra suelta solo se convierte si lo que la precede es una referencia (token con algún dígito) y
+    lo que la sigue es fin de texto, puntuación, «y», «cajas» o «unidades»: «tengo la 664 para dos» y
+    «necesito dos» no se tocan. «un/una/uno» solo cuentan junto a «caja(s)» (si no, son el artículo). Las
+    cantidades ANTES de la referencia («dos 664») las lee `_RE_CANT_ANTES` por su cuenta.
+    """
+    import re as _r
+    t = _r.sub(r'\bmedia\s+docena\b', '6', texto, flags=_r.IGNORECASE)
+    t = _r.sub(
+        r'\b(\d{1,2}|un|uno|una|' + _ALT_NUM + r')\s+docenas?\b',
+        lambda m: str((int(m.group(1)) if m.group(1).isdigit() else _PALABRAS_NUM[m.group(1).lower()]) * 12),
+        t, flags=_r.IGNORECASE)
+    t = _r.sub(r'\bdocena\b', '12', t, flags=_r.IGNORECASE)
+
+    def _post(m):
+        previo, pal, resto = m.group(1), m.group(2).lower(), m.group(3)
+        if not _r.search(r'\d', previo):
+            return m.group(0)
+        if pal in ('un', 'uno', 'una') and not _r.match(r'\s*cajas?\b', resto, _r.IGNORECASE):
+            return m.group(0)
+        return '%s %d%s' % (previo, _PALABRAS_NUM[pal], resto)
+
+    return _r.sub(
+        r'(\S+)\s+(' + _ALT_NUM + r'|un|uno|una)\b(\s*cajas?\b|\s*$|\s*[,.;]|\s+y\b|\s+unidades?\b|\s+unds?\b)',
+        _post, t, flags=_r.IGNORECASE)
+
+
 def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
     """Factory that creates all JPC Odoo tools."""
     odoo = get_odoo_client()
@@ -5553,6 +5590,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         )
         # «CRG-137» / «CRG 137» → «CRG137» (ver _RE_PREFIJO_CARTUCHO): sin esto la referencia era solo «137».
         mensaje_n = _RE_PREFIJO_CARTUCHO.sub(lambda m: m.group(1) or m.group(2), mensaje)
+        mensaje_n = _numeros_en_palabras(mensaje_n)
         msg_clean = _MOD.sub(' ', mensaje_n)
         msg_clean = _re.sub(r' {2,}', ' ', msg_clean).strip()
 

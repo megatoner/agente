@@ -5574,6 +5574,17 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         # contaba como dos referencias. «Nx» ('83X', '05X', '10X'…) NO se toca: son referencias reales.
         QTY_PAT = _re.compile(r'(?<![A-Za-z0-9])(?:[xX]\s?(\d{1,3})|(\d{1,2}))(?![A-Za-z0-9])')
         _RE_X_CANTIDAD = _re.compile(r'[xX]\d{1,3}')
+        # Cantidad ANTES de la referencia («2 de 664», «necesito 3 664», «3 unidades de la 664»): hasta hoy
+        # solo se leía la que iba después y quedaba en 1. Se aplica sobre el tramo ORIGINAL que precede a la
+        # referencia (con sus «de», «unidades»...). Con una referencia anterior en el mensaje se exige un
+        # conector («3 de 85A»): «664 2 85A» sigue siendo «2» de la 664, como siempre.
+        _RE_CANT_ANTES = _re.compile(
+            r'(?<![A-Za-z0-9+#.,/\-])(?P<n>\d{1,2})\s+(?P<conector>(?:unidades?|unds?\.?|und\.?|piezas?|botellas?|frascos?)\s+(?:de\s+)?|de\s+)?'
+            r'(?:(?:la|el|los|las)\s+)?(?:(?:referencia|ref\.?|modelo)\s+)?'
+            r'(?:(?:tintas?|cartuchos?|toners?|t[oó]ners?|botellas?)\s+)?(?:(?:la|el|los|las)\s+)?$',
+            _re.IGNORECASE,
+        )
+
 
         # Referencia "corta" (ej. U4, M6, con <2 digitos): solo se busca en
         # terminos EXACTOS (=ilike sobre el string completo, sin riesgo de
@@ -5601,6 +5612,8 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         # El tipo de repuesto es pegajoso ("almohadilla L3210 y L220" → ambas)
         # hasta que aparezca una palabra de consumible (toner/cartucho/tinta).
         pairs = []
+        _cands_qty = []   # por referencia: números sueltos del tramo que la sigue
+        _pre_qty = []     # por referencia: cantidad escrita ANTES de ella (o None)
         msg_low = mensaje_n.lower()
         search_pos = 0
         prev_end_orig = 0
@@ -5609,6 +5622,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             ref = m.group(1).upper()
             seg_end = ref_matches[i + 1].start() if i + 1 < len(ref_matches) else len(msg_clean)
             segment = msg_clean[m.end():seg_end]
+            _cands_qty.append(list(QTY_PAT.finditer(segment)))
             qty_m = QTY_PAT.search(segment)
             qty = int(qty_m.group(1) or qty_m.group(2)) if qty_m else 1
             pos = msg_low.find(ref.lower(), search_pos)
@@ -5618,12 +5632,33 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 prev_end_orig = pos + len(ref)
             else:
                 antes = ''
+            _mq = _RE_CANT_ANTES.search(antes) if antes else None
+            # Un número precedido por OTRO número es parte de una dirección o un teléfono, no una cantidad
+            # («CR 25 4 165»): hallado al comparar con mensajes reales de clientes.
+            if _mq and _re.search(r'\d\s*$', antes[:_mq.start('n')]):
+                _mq = None
+            _pre_qty.append(int(_mq.group('n')) if _mq and (i == 0 or _mq.group('conector')) else None)
             tipo_seg = _detectar_repuesto(antes)
             if tipo_seg:
                 sticky_tipo = tipo_seg
             elif _CARTUCHO_RE.search(antes):
                 sticky_tipo = None
             pairs.append((ref, qty, sticky_tipo))
+
+        # Cantidad definitiva: la escrita antes de la referencia manda; si no, la primera tras ella. El
+        # último número del tramo de una referencia es de la SIGUIENTE si esta la reclamó como suya
+        # («664 y 3 de 85A»: el 3 es de la 85A, no de la 664).
+        for _i, (_ref, _q, _tp) in enumerate(pairs):
+            _c = _cands_qty[_i]
+            if _i + 1 < len(pairs) and _pre_qty[_i + 1] is not None and _c:
+                _c = _c[:-1]
+            if _pre_qty[_i] is not None:
+                _q = _pre_qty[_i]
+            elif _c:
+                _q = int(_c[0].group(1) or _c[0].group(2))
+            else:
+                _q = 1
+            pairs[_i] = (_ref, _q, _tp)
 
         def _estrechar_variantes(variantes, texto):
             """Con una sola referencia en el mensaje, deja solo la variante del color/línea pedidos.

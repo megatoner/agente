@@ -5579,12 +5579,27 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         # referencia (con sus «de», «unidades»...). Con una referencia anterior en el mensaje se exige un
         # conector («3 de 85A»): «664 2 85A» sigue siendo «2» de la 664, como siempre.
         _RE_CANT_ANTES = _re.compile(
-            r'(?<![A-Za-z0-9+#.,/\-])(?P<n>\d{1,2})\s+(?P<conector>(?:unidades?|unds?\.?|und\.?|piezas?|botellas?|frascos?)\s+(?:de\s+)?|de\s+)?'
+            r'(?<![A-Za-z0-9+#.,/\-])(?P<n>\d{1,2}|uno|una|un|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)\s+'
+            r'(?P<conector>(?:unidades?|unds?\.?|und\.?|piezas?|botellas?|frascos?|cajas?)\s+(?:de\s+)?|de\s+)?'
             r'(?:(?:la|el|los|las)\s+)?(?:(?:referencia|ref\.?|modelo)\s+)?'
             r'(?:(?:tintas?|cartuchos?|toners?|t[oó]ners?|botellas?)\s+)?(?:(?:la|el|los|las)\s+)?$',
             _re.IGNORECASE,
         )
 
+
+        # Cantidad en palabras («dos 664», «una caja de 105x») y cajas: una caja = las unidades que el
+        # producto trae por caja (Compras › Cajas › «Cantidad B», `jpc.box.model.qty_b`).
+        _NUM_PALABRAS = {
+            'un': 1, 'uno': 1, 'una': 1, 'dos': 2, 'tres': 3, 'cuatro': 4, 'cinco': 5, 'seis': 6,
+            'siete': 7, 'ocho': 8, 'nueve': 9, 'diez': 10, 'once': 11, 'doce': 12,
+        }
+
+        def _n_de(txt):
+            t = txt.lower()
+            return int(t) if t.isdigit() else _NUM_PALABRAS[t]
+
+        _RE_CAJA_DESPUES = _re.compile(r'\s*cajas?\b', _re.IGNORECASE)
+        _cajas_por_ref = {}   # ref (mayúsculas) -> cantidad de CAJAS pedidas
 
         # Referencia "corta" (ej. U4, M6, con <2 digitos): solo se busca en
         # terminos EXACTOS (=ilike sobre el string completo, sin riesgo de
@@ -5614,6 +5629,7 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
         pairs = []
         _cands_qty = []   # por referencia: números sueltos del tramo que la sigue
         _pre_qty = []     # por referencia: cantidad escrita ANTES de ella (o None)
+        _pre_caja = []    # por referencia: esa cantidad estaba en CAJAS
         msg_low = mensaje_n.lower()
         search_pos = 0
         prev_end_orig = 0
@@ -5637,7 +5653,9 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
             # («CR 25 4 165»): hallado al comparar con mensajes reales de clientes.
             if _mq and _re.search(r'\d\s*$', antes[:_mq.start('n')]):
                 _mq = None
-            _pre_qty.append(int(_mq.group('n')) if _mq and (i == 0 or _mq.group('conector')) else None)
+            _pre_qty.append(_n_de(_mq.group('n')) if _mq and (i == 0 or _mq.group('conector')) else None)
+            _pre_caja.append(bool(_mq and (i == 0 or _mq.group('conector'))
+                                  and _re.search(r'cajas?', _mq.group('conector') or '', _re.IGNORECASE)))
             tipo_seg = _detectar_repuesto(antes)
             if tipo_seg:
                 sticky_tipo = tipo_seg
@@ -5654,8 +5672,14 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 _c = _c[:-1]
             if _pre_qty[_i] is not None:
                 _q = _pre_qty[_i]
+                if _pre_caja[_i]:
+                    _cajas_por_ref[_ref] = _q
             elif _c:
                 _q = int(_c[0].group(1) or _c[0].group(2))
+                # «85A 2 cajas»
+                _seg_fin = ref_matches[_i + 1].start() if _i + 1 < len(ref_matches) else len(msg_clean)
+                if _RE_CAJA_DESPUES.match(msg_clean[ref_matches[_i].end() + _c[0].end():_seg_fin]):
+                    _cajas_por_ref[_ref] = _q
             else:
                 _q = 1
             pairs[_i] = (_ref, _q, _tp)
@@ -5872,6 +5896,31 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 if tmpls else best.get("default_code", str(best["id"]))
             )
 
+            # «N cajas» → unidades. Sin caja definida (o con Cantidad B = 1, el valor por defecto = nadie lo
+            # cargó) NO se inventa la conversión: se avisa para preguntarle al cliente cuántas unidades.
+            _sin_caja = False
+            _n_cajas = _cajas_por_ref.get(ref)
+            if _n_cajas:
+                _u = 0
+                try:
+                    _bx = odoo.search_read(
+                        "product.product", [("id", "=", best["id"])],
+                        ["box_ids_variant"], limit=1)
+                    _ids = (_bx[0].get("box_ids_variant") if _bx else None) or []
+                    if not _ids:
+                        _ids = (odoo.search_read(
+                            "product.template", [("id", "=", tmpl_id)], ["box_ids"], limit=1
+                        ) or [{}])[0].get("box_ids") or []
+                    _cj = odoo.search_read("jpc.box.model", [("id", "in", _ids)], ["qty_b"], limit=5) if _ids else []
+                    _u = int(round(_cj[0].get("qty_b") or 0)) if _cj else 0   # primera caja, como la hoja de precios
+                except Exception as _e:
+                    logger.warning("buscar_referencias_mensaje: cajas no leídas: %s", _e)
+                if _u > 1:
+                    qty = _n_cajas * _u
+                else:
+                    _sin_caja = True
+                    qty = _n_cajas
+
             # Registrar en carrito (un producto agotado NO se registra: no se cotiza)
             if ch_id and not _agotado:
                 _upsert_carrito_linea(
@@ -5914,6 +5963,8 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 "confidence": confidence,
                 "qty_available": best.get("qty_available", 0),
                 "agotado": _agotado,
+                "cajas": _n_cajas or 0,
+                "sin_caja": _sin_caja,
             })
 
         # Notificar al asesor los no encontrados (incluye repuestos sin match)
@@ -5953,6 +6004,13 @@ def create_odoo_tools(odoo_context: Optional[Dict[str, Any]] = None):
                 f"PRODUCT_ID:{r['product_id']} | {r['product_name']} "
                 f"| Qty:{r['qty']} | {icon} | {stock}"
             )
+            if r.get("cajas") and not r.get("sin_caja"):
+                lines.append(f"  ↳ {r['cajas']} caja(s) = {r['qty']} unidades (según la caja del producto).")
+            elif r.get("sin_caja"):
+                lines.append(
+                    f"  ↳ El cliente pidió {r['cajas']} caja(s) pero este producto NO tiene cantidad por caja "
+                    "definida: NO inventes el número. Pregúntale cuántas unidades quiere (Qty es provisional)."
+                )
         if hay_agotados:
             _mensaje_agotado, _escalar_agotado = _obtener_respuesta_producto(
                 'agotado_busqueda', mensaje,
